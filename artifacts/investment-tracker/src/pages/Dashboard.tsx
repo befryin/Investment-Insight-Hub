@@ -1,23 +1,34 @@
 import { useLiveQuery } from 'dexie-react-hooks';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { db } from '@/lib/db';
 import { formatCurrency, formatPercent } from '@/lib/csvUtils';
 import { calculateDollarGainLoss, buildXirrFlows, xirr } from '@/lib/calculations';
 import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer, Legend } from 'recharts';
-import { TrendingUp, TrendingDown, DollarSign, RefreshCw, Calendar, Wallet } from 'lucide-react';
+import { TrendingUp, TrendingDown, RefreshCw, Calendar, ArrowRightLeft } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { refreshAllPrices } from '@/lib/marketData';
+import { Input } from '@/components/ui/input';
+import { refreshAllPrices, fetchQuotes, fetchHistoricalPrices } from '@/lib/marketData';
 import { cn } from '@/lib/utils';
 
 const CHART_COLORS = ['#10b981', '#3b82f6', '#f59e0b', '#8b5cf6', '#ef4444', '#06b6d4', '#ec4899'];
 
-void DollarSign;
+type PeriodKey = '3mo' | '6mo' | '1y';
+type HistMap = Record<string, number | null>;
 
 export default function Dashboard() {
   const [refreshing, setRefreshing] = useState(false);
   const [selectedPortfolioId, setSelectedPortfolioId] = useState<string | null>(null);
+
+  // FX state
+  const [cadUsdRate, setCadUsdRate] = useState<number | null>(null);
+  const [fxAmount, setFxAmount] = useState('');
+  const [fxDirection, setFxDirection] = useState<'CAD_TO_USD' | 'USD_TO_CAD'>('CAD_TO_USD');
+
+  // Historical prices state
+  const [histPrices, setHistPrices] = useState<Record<PeriodKey, HistMap>>({ '3mo': {}, '6mo': {}, '1y': {} });
+  const [histLoading, setHistLoading] = useState(false);
 
   const portfolios = useLiveQuery(() => db.portfolios.toArray(), []);
   const accounts = useLiveQuery(() => db.accounts.toArray(), []);
@@ -34,6 +45,14 @@ export default function Dashboard() {
       setSelectedPortfolioId(portfolios[0].id);
     }
   }, [portfolios, selectedPortfolioId]);
+
+  // Fetch CAD/USD rate once on mount
+  useEffect(() => {
+    fetchQuotes(['CADUSD=X']).then(qs => {
+      const q = qs.find(x => x.symbol === 'CADUSD=X');
+      if (q) setCadUsdRate(q.price);
+    }).catch(() => {});
+  }, []);
 
   const priceMap = new Map((prices || []).map(p => [p.ticker, p]));
   const securityMap = new Map((securities || []).map(s => [s.id, s]));
@@ -56,10 +75,11 @@ export default function Dashboard() {
     const gain = marketValue - h.bookValue;
     const gainPct = h.bookValue > 0 ? (gain / h.bookValue) * 100 : 0;
     const dayChange = price ? h.shares * price.change : 0;
+    const dayChangePct = price?.changePercent ?? 0;
     totalBookValue += h.bookValue;
     totalMarketValue += marketValue;
     todayChange += dayChange;
-    return { ...h, sec, price, marketValue, gain, gainPct, dayChange };
+    return { ...h, sec, price, marketValue, gain, gainPct, dayChange, dayChangePct };
   });
 
   const cashTotal = filteredAccounts.reduce((sum, a) => sum + a.cashBalance, 0);
@@ -71,6 +91,58 @@ export default function Dashboard() {
   const xirrFlows = buildXirrFlows(filteredTx, totalPortfolioValue);
   const mwr = xirr(xirrFlows);
 
+  // Fetch historical prices whenever the tickers in view change
+  const tickerList = holdingDetails.map(h => h.sec?.ticker).filter(Boolean).join(',');
+  const loadHistoricalPrices = useCallback(async (tickers: string[]) => {
+    if (tickers.length === 0) return;
+    setHistLoading(true);
+    const [mo3, mo6, y1] = await Promise.all([
+      fetchHistoricalPrices(tickers, '3mo'),
+      fetchHistoricalPrices(tickers, '6mo'),
+      fetchHistoricalPrices(tickers, '1y'),
+    ]);
+    setHistPrices({ '3mo': mo3, '6mo': mo6, '1y': y1 });
+    setHistLoading(false);
+  }, []);
+
+  useEffect(() => {
+    const tickers = tickerList ? tickerList.split(',') : [];
+    void loadHistoricalPrices(tickers);
+  }, [tickerList, loadHistoricalPrices]);
+
+  // Compute dollar change for a historical period
+  function periodChange(histMap: HistMap): { dollar: number; pct: number } | null {
+    if (Object.keys(histMap).length === 0) return null;
+    let histValue = cashTotal; // cash unchanged
+    let hasPrices = false;
+    for (const h of filteredHoldings) {
+      const sec = securityMap.get(h.securityId);
+      if (!sec) { histValue += h.bookValue; continue; }
+      const hp = histMap[sec.ticker];
+      if (hp !== null && hp !== undefined) {
+        histValue += h.shares * hp;
+        hasPrices = true;
+      } else {
+        histValue += h.bookValue;
+      }
+    }
+    if (!hasPrices) return null;
+    const dollar = totalPortfolioValue - histValue;
+    const pct = histValue > 0 ? (dollar / histValue) * 100 : 0;
+    return { dollar, pct };
+  }
+
+  const todayChangePct = (totalPortfolioValue - todayChange) > 0
+    ? (todayChange / (totalPortfolioValue - todayChange)) * 100
+    : 0;
+
+  const changes = {
+    '1d': { dollar: todayChange, pct: todayChangePct, loading: false },
+    '3mo': { ...periodChange(histPrices['3mo']), loading: histLoading },
+    '6mo': { ...periodChange(histPrices['6mo']), loading: histLoading },
+    '1y': { ...periodChange(histPrices['1y']), loading: histLoading },
+  };
+
   // Asset allocation by assetClass
   const allocationMap = new Map<string, number>();
   for (const h of holdingDetails) {
@@ -79,10 +151,10 @@ export default function Dashboard() {
   }
   const allocationData = Array.from(allocationMap.entries()).map(([name, value]) => ({ name, value }));
 
-  // Top gainers/losers
-  const sorted = [...holdingDetails].sort((a, b) => b.gainPct - a.gainPct);
-  const gainers = sorted.slice(0, 3);
-  const losers = sorted.filter(h => h.gainPct < 0).reverse().slice(0, 3);
+  // Today's gainers / losers (sorted by today's % change)
+  const withDayChange = holdingDetails.filter(h => h.price && h.shares > 0);
+  const todayGainers = [...withDayChange].sort((a, b) => b.dayChangePct - a.dayChangePct).filter(h => h.dayChangePct > 0);
+  const todayLosers = [...withDayChange].sort((a, b) => a.dayChangePct - b.dayChangePct).filter(h => h.dayChangePct < 0);
 
   // Current year contributions
   const currentYear = new Date().getFullYear();
@@ -95,6 +167,13 @@ export default function Dashboard() {
       const allHoldings = await db.holdings.toArray();
       const allSecs = await db.securities.toArray();
       await refreshAllPrices(allHoldings, allSecs);
+      // Also refresh FX rate
+      const qs = await fetchQuotes(['CADUSD=X']);
+      const q = qs.find(x => x.symbol === 'CADUSD=X');
+      if (q) setCadUsdRate(q.price);
+      // Reload historical
+      const tickers = tickerList ? tickerList.split(',') : [];
+      await loadHistoricalPrices(tickers);
     } finally {
       setRefreshing(false);
     }
@@ -113,16 +192,22 @@ export default function Dashboard() {
     default: 'bg-gray-100 text-gray-600',
   };
 
+  // FX calculation
+  const fxNum = parseFloat(fxAmount);
+  const fxConverted = cadUsdRate && isFinite(fxNum) && fxNum > 0
+    ? fxDirection === 'CAD_TO_USD' ? fxNum * cadUsdRate : fxNum / cadUsdRate
+    : null;
+
   return (
     <div className="p-6 space-y-6">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
           <h1 className="text-2xl font-bold text-foreground">Dashboard</h1>
           <p className="text-muted-foreground text-sm mt-0.5">Portfolio overview as of today</p>
         </div>
         <div className="flex items-center gap-3">
-          <div className="flex gap-1">
+          <div className="flex gap-1 flex-wrap">
             {(portfolios || []).map(p => (
               <button
                 key={p.id}
@@ -149,19 +234,14 @@ export default function Dashboard() {
               All
             </button>
           </div>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={handleRefreshPrices}
-            disabled={refreshing}
-          >
+          <Button variant="outline" size="sm" onClick={handleRefreshPrices} disabled={refreshing}>
             <RefreshCw className={cn('h-3.5 w-3.5 mr-1.5', refreshing && 'animate-spin')} />
             {refreshing ? 'Refreshing...' : 'Refresh Prices'}
           </Button>
         </div>
       </div>
 
-      {/* Summary Cards — 5 cards: market value, book, gain/loss, today, MWR */}
+      {/* Summary Cards */}
       <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
         <Card>
           <CardContent className="p-4">
@@ -194,12 +274,9 @@ export default function Dashboard() {
             <p className={cn('text-2xl font-bold mt-1 num', todayChange >= 0 ? 'text-emerald-600' : 'text-rose-600')}>
               {todayChange >= 0 ? '+' : ''}{formatCurrency(todayChange)}
             </p>
-            <div className="flex items-center gap-1 mt-1">
-              {todayChange >= 0
-                ? <TrendingUp className="h-3 w-3 text-emerald-500" />
-                : <TrendingDown className="h-3 w-3 text-rose-500" />}
-              <span className="text-xs text-muted-foreground">vs. yesterday</span>
-            </div>
+            <p className={cn('text-xs mt-1 num', todayChange >= 0 ? 'text-emerald-500' : 'text-rose-500')}>
+              {todayChange >= 0 ? '+' : ''}{formatPercent(todayChangePct)}
+            </p>
           </CardContent>
         </Card>
         <Card>
@@ -213,34 +290,74 @@ export default function Dashboard() {
         </Card>
       </div>
 
+      {/* Period Change Cards */}
+      <div>
+        <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide mb-3">Portfolio Performance</h2>
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+          {([
+            { label: '1 Day', key: '1d' },
+            { label: '3 Months', key: '3mo' },
+            { label: '6 Months', key: '6mo' },
+            { label: '1 Year', key: '1y' },
+          ] as const).map(({ label, key }) => {
+            const c = changes[key];
+            const loading = key !== '1d' && histLoading;
+            const hasData = c && c.dollar !== undefined && c.dollar !== null;
+            const dollar = hasData ? (c.dollar as number) : 0;
+            const pct = hasData ? (c.pct as number) : 0;
+            const isPositive = dollar >= 0;
+            return (
+              <Card key={key}>
+                <CardContent className="p-4">
+                  <p className="text-xs text-muted-foreground uppercase tracking-wide font-medium">{label}</p>
+                  {loading ? (
+                    <div className="mt-2 space-y-1.5">
+                      <div className="h-6 w-24 bg-muted animate-pulse rounded" />
+                      <div className="h-3.5 w-16 bg-muted animate-pulse rounded" />
+                    </div>
+                  ) : hasData ? (
+                    <>
+                      <p className={cn('text-xl font-bold mt-1 num', isPositive ? 'text-emerald-600' : 'text-rose-600')}>
+                        {isPositive ? '+' : ''}{formatCurrency(dollar)}
+                      </p>
+                      <div className="flex items-center gap-1 mt-0.5">
+                        {isPositive
+                          ? <TrendingUp className="h-3 w-3 text-emerald-500 flex-shrink-0" />
+                          : <TrendingDown className="h-3 w-3 text-rose-500 flex-shrink-0" />}
+                        <p className={cn('text-xs num', isPositive ? 'text-emerald-500' : 'text-rose-500')}>
+                          {isPositive ? '+' : ''}{formatPercent(pct)}
+                        </p>
+                      </div>
+                    </>
+                  ) : (
+                    <p className="text-xl font-bold mt-1 text-muted-foreground">—</p>
+                  )}
+                </CardContent>
+              </Card>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Middle row: allocation + contributions */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        {/* Asset Allocation Chart */}
         <Card className="lg:col-span-2">
           <CardHeader className="pb-2">
             <CardTitle className="text-base">Asset Allocation</CardTitle>
           </CardHeader>
           <CardContent>
             {allocationData.length > 0 ? (
-              <div className="flex items-center gap-4">
-                <ResponsiveContainer width="100%" height={220}>
-                  <PieChart>
-                    <Pie data={allocationData} cx="45%" cy="50%" outerRadius={90} dataKey="value" stroke="none">
-                      {allocationData.map((_, i) => (
-                        <Cell key={i} fill={CHART_COLORS[i % CHART_COLORS.length]} />
-                      ))}
-                    </Pie>
-                    <Tooltip
-                      formatter={(v: number) => formatCurrency(v)}
-                      contentStyle={{ fontSize: 12, borderRadius: 6 }}
-                    />
-                    <Legend
-                      iconType="circle"
-                      iconSize={8}
-                      formatter={(v) => <span style={{ fontSize: 12 }}>{v}</span>}
-                    />
-                  </PieChart>
-                </ResponsiveContainer>
-              </div>
+              <ResponsiveContainer width="100%" height={220}>
+                <PieChart>
+                  <Pie data={allocationData} cx="45%" cy="50%" outerRadius={90} dataKey="value" stroke="none">
+                    {allocationData.map((_, i) => (
+                      <Cell key={i} fill={CHART_COLORS[i % CHART_COLORS.length]} />
+                    ))}
+                  </Pie>
+                  <Tooltip formatter={(v: number) => formatCurrency(v)} contentStyle={{ fontSize: 12, borderRadius: 6 }} />
+                  <Legend iconType="circle" iconSize={8} formatter={(v) => <span style={{ fontSize: 12 }}>{v}</span>} />
+                </PieChart>
+              </ResponsiveContainer>
             ) : (
               <div className="h-[220px] flex items-center justify-center text-muted-foreground text-sm">
                 No holdings data
@@ -249,7 +366,6 @@ export default function Dashboard() {
           </CardContent>
         </Card>
 
-        {/* Contribution Summary */}
         <Card>
           <CardHeader className="pb-2">
             <CardTitle className="text-base flex items-center gap-2">
@@ -272,9 +388,9 @@ export default function Dashboard() {
               </div>
               <p className="num text-sm font-semibold">{formatCurrency(tfsaContrib)}</p>
             </div>
-            <div className="pt-2">
-              <p className="text-xs text-muted-foreground">Cash by Account</p>
-              <div className="mt-2 space-y-1">
+            <div className="pt-1">
+              <p className="text-xs text-muted-foreground mb-2">Cash by Account</p>
+              <div className="space-y-1">
                 {filteredAccounts.map(a => (
                   <div key={a.id} className="flex items-center justify-between">
                     <span className="text-xs text-muted-foreground truncate max-w-[110px]">{a.name}</span>
@@ -287,52 +403,164 @@ export default function Dashboard() {
         </Card>
       </div>
 
+      {/* Today's Gainers & Losers — full width */}
+      <Card>
+        <CardHeader className="pb-2">
+          <CardTitle className="text-base flex items-center gap-2">
+            <TrendingUp className="h-4 w-4 text-emerald-500" />
+            Today's Market
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          {withDayChange.length === 0 ? (
+            <p className="text-muted-foreground text-sm py-4 text-center">Refresh prices to see today's movers</p>
+          ) : (
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              {/* Gainers */}
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-wide text-emerald-600 mb-2 flex items-center gap-1">
+                  <TrendingUp className="h-3 w-3" /> Gainers
+                </p>
+                {todayGainers.length === 0
+                  ? <p className="text-xs text-muted-foreground py-2">No gainers today</p>
+                  : todayGainers.map(h => (
+                    <div key={h.id} className="flex items-center justify-between py-2 border-b border-border last:border-0">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <div className="w-7 h-7 rounded-full bg-emerald-100 flex items-center justify-center flex-shrink-0">
+                          <TrendingUp className="h-3.5 w-3.5 text-emerald-600" />
+                        </div>
+                        <div className="min-w-0">
+                          <p className="text-sm font-semibold">{h.sec?.ticker || 'Unknown'}</p>
+                          <p className="text-xs text-muted-foreground truncate max-w-[160px]">{h.sec?.name}</p>
+                        </div>
+                      </div>
+                      <div className="text-right flex-shrink-0 ml-2">
+                        <p className="text-sm num font-semibold text-emerald-600">
+                          +{formatCurrency(h.dayChange)}
+                        </p>
+                        <p className="text-xs num text-emerald-500">
+                          +{formatPercent(h.dayChangePct)} today
+                        </p>
+                      </div>
+                    </div>
+                  ))}
+              </div>
+              {/* Losers */}
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-wide text-rose-600 mb-2 flex items-center gap-1">
+                  <TrendingDown className="h-3 w-3" /> Losers
+                </p>
+                {todayLosers.length === 0
+                  ? <p className="text-xs text-muted-foreground py-2">No losers today</p>
+                  : todayLosers.map(h => (
+                    <div key={h.id} className="flex items-center justify-between py-2 border-b border-border last:border-0">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <div className="w-7 h-7 rounded-full bg-rose-100 flex items-center justify-center flex-shrink-0">
+                          <TrendingDown className="h-3.5 w-3.5 text-rose-600" />
+                        </div>
+                        <div className="min-w-0">
+                          <p className="text-sm font-semibold">{h.sec?.ticker || 'Unknown'}</p>
+                          <p className="text-xs text-muted-foreground truncate max-w-[160px]">{h.sec?.name}</p>
+                        </div>
+                      </div>
+                      <div className="text-right flex-shrink-0 ml-2">
+                        <p className="text-sm num font-semibold text-rose-600">
+                          {formatCurrency(h.dayChange)}
+                        </p>
+                        <p className="text-xs num text-rose-500">
+                          {formatPercent(h.dayChangePct)} today
+                        </p>
+                      </div>
+                    </div>
+                  ))}
+              </div>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Bottom row: Currency Converter + Recent Transactions */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        {/* Top Movers */}
+        {/* Currency Converter */}
         <Card>
           <CardHeader className="pb-2">
-            <CardTitle className="text-base">Top Movers</CardTitle>
+            <CardTitle className="text-base flex items-center gap-2">
+              <ArrowRightLeft className="h-4 w-4" />
+              Currency Converter
+            </CardTitle>
           </CardHeader>
-          <CardContent>
-            <div className="space-y-1">
-              {gainers.length === 0 && losers.length === 0 && (
-                <p className="text-muted-foreground text-sm py-4 text-center">No holdings data</p>
+          <CardContent className="space-y-4">
+            {/* Live rate */}
+            <div className="flex items-center justify-between rounded-lg bg-muted/50 px-3 py-2">
+              <span className="text-xs text-muted-foreground font-medium">Live Rate</span>
+              {cadUsdRate ? (
+                <div className="text-right">
+                  <p className="text-sm font-semibold num">1 CAD = {cadUsdRate.toFixed(4)} USD</p>
+                  <p className="text-xs text-muted-foreground num">1 USD = {(1 / cadUsdRate).toFixed(4)} CAD</p>
+                </div>
+              ) : (
+                <div className="h-4 w-36 bg-muted animate-pulse rounded" />
               )}
-              {gainers.map(h => (
-                <div key={h.id} className="flex items-center justify-between py-1.5">
-                  <div className="flex items-center gap-2">
-                    <TrendingUp className="h-3.5 w-3.5 text-emerald-500 flex-shrink-0" />
-                    <div>
-                      <p className="text-sm font-medium">{h.sec?.ticker || 'Unknown'}</p>
-                      <p className="text-xs text-muted-foreground truncate max-w-[140px]">{h.sec?.name}</p>
-                    </div>
-                  </div>
-                  <div className="text-right">
-                    <p className="text-sm num font-semibold text-emerald-600">
-                      +{formatCurrency(h.gain)}
-                    </p>
-                    <p className="text-xs num text-emerald-500">{formatPercent(h.gainPct)}</p>
-                  </div>
-                </div>
-              ))}
-              {losers.map(h => (
-                <div key={h.id} className="flex items-center justify-between py-1.5">
-                  <div className="flex items-center gap-2">
-                    <TrendingDown className="h-3.5 w-3.5 text-rose-500 flex-shrink-0" />
-                    <div>
-                      <p className="text-sm font-medium">{h.sec?.ticker || 'Unknown'}</p>
-                      <p className="text-xs text-muted-foreground truncate max-w-[140px]">{h.sec?.name}</p>
-                    </div>
-                  </div>
-                  <div className="text-right">
-                    <p className="text-sm num font-semibold text-rose-600">
-                      {formatCurrency(h.gain)}
-                    </p>
-                    <p className="text-xs num text-rose-500">{formatPercent(h.gainPct)}</p>
-                  </div>
-                </div>
-              ))}
             </div>
+            {/* Direction toggle */}
+            <div className="flex gap-2">
+              <button
+                onClick={() => setFxDirection('CAD_TO_USD')}
+                className={cn(
+                  'flex-1 py-1.5 rounded-md text-xs font-medium transition-colors border',
+                  fxDirection === 'CAD_TO_USD'
+                    ? 'bg-primary text-primary-foreground border-primary'
+                    : 'bg-muted text-muted-foreground border-border hover:bg-muted/80'
+                )}
+              >
+                CAD → USD
+              </button>
+              <button
+                onClick={() => setFxDirection('USD_TO_CAD')}
+                className={cn(
+                  'flex-1 py-1.5 rounded-md text-xs font-medium transition-colors border',
+                  fxDirection === 'USD_TO_CAD'
+                    ? 'bg-primary text-primary-foreground border-primary'
+                    : 'bg-muted text-muted-foreground border-border hover:bg-muted/80'
+                )}
+              >
+                USD → CAD
+              </button>
+            </div>
+            {/* Input */}
+            <div className="space-y-2">
+              <div className="relative">
+                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground text-sm font-medium">
+                  {fxDirection === 'CAD_TO_USD' ? 'CAD' : 'USD'}
+                </span>
+                <Input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  placeholder="0.00"
+                  value={fxAmount}
+                  onChange={e => setFxAmount(e.target.value)}
+                  className="pl-12 num"
+                />
+              </div>
+              {/* Result */}
+              <div className={cn(
+                'rounded-lg border px-3 py-2.5 transition-colors',
+                fxConverted !== null ? 'bg-emerald-50 border-emerald-200' : 'bg-muted/30 border-border'
+              )}>
+                <span className="text-xs text-muted-foreground font-medium block mb-0.5">
+                  {fxDirection === 'CAD_TO_USD' ? 'USD' : 'CAD'}
+                </span>
+                <p className={cn('text-lg font-bold num', fxConverted !== null ? 'text-emerald-700' : 'text-muted-foreground')}>
+                  {fxConverted !== null ? fxConverted.toFixed(2) : '—'}
+                </p>
+              </div>
+            </div>
+            {!cadUsdRate && (
+              <p className="text-xs text-muted-foreground text-center">
+                Click Refresh Prices to load the live rate
+              </p>
+            )}
           </CardContent>
         </Card>
 
@@ -351,8 +579,7 @@ export default function Dashboard() {
                 const acct = accountMap.get(t.accountId);
                 const colorClass = typeColors[t.type] || typeColors.default;
                 return (
-                  <div key={t.id}
-                    className="flex items-center justify-between py-2 border-b border-border last:border-0">
+                  <div key={t.id} className="flex items-center justify-between py-2 border-b border-border last:border-0">
                     <div className="flex items-center gap-2 min-w-0">
                       <Badge className={cn('text-xs px-1.5 py-0 font-medium border-0 flex-shrink-0', colorClass)}>
                         {t.type}

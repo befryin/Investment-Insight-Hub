@@ -1,9 +1,6 @@
 import { db, type Holding, type Security, type PriceCache } from './db';
 
-const BASE = import.meta.env.BASE_URL ?? '/investment-tracker/';
-
 function apiUrl(path: string) {
-  // Route through the shared proxy to the api-server (avoids CORS on direct Yahoo calls)
   return `/api/${path}`;
 }
 
@@ -100,4 +97,21 @@ export async function refreshAllPrices(holdings: Holding[], securities: Security
   );
 }
 
-void BASE;
+export type HistoricalPrices = Record<string, number | null>;
+
+export async function fetchHistoricalPrices(
+  tickers: string[],
+  period: '1mo' | '3mo' | '6mo' | '1y',
+): Promise<HistoricalPrices> {
+  if (tickers.length === 0) return {};
+  try {
+    const res = await fetch(
+      apiUrl(`history?symbols=${encodeURIComponent(tickers.join(','))}&period=${period}`),
+    );
+    if (!res.ok) throw new Error(`History fetch failed: ${res.status}`);
+    const data = await res.json() as { prices: HistoricalPrices };
+    return data.prices;
+  } catch {
+    return {};
+  }
+}
