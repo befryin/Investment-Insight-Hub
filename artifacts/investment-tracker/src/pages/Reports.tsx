@@ -1,8 +1,8 @@
 import { useLiveQuery } from 'dexie-react-hooks';
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import { db } from '@/lib/db';
 import { formatCurrency, formatPercent } from '@/lib/csvUtils';
-import { calculateModifiedDietz, calculateDollarGainLoss } from '@/lib/calculations';
+import { calculateModifiedDietz, calculateDollarGainLoss, calculateRealizedGainsPerSell, buildXirrFlows, xirr } from '@/lib/calculations';
 import {
   PieChart, Pie, Cell, Tooltip, Legend, ResponsiveContainer,
   BarChart, Bar, XAxis, YAxis, CartesianGrid, LineChart, Line
@@ -21,6 +21,7 @@ export default function Reports() {
   const [portfolioFilter, setPortfolioFilter] = useState('all');
   const [incomeType, setIncomeType] = useState('all');
   const [incomeYear, setIncomeYear] = useState('all');
+  const [gainsYear, setGainsYear] = useState('all');
   const [startDate, setStartDate] = useState('2023-01-01');
   const [endDate, setEndDate] = useState(new Date().toISOString().split('T')[0]);
 
@@ -34,6 +35,7 @@ export default function Reports() {
   const priceMap = new Map((prices || []).map(p => [p.ticker, p]));
   const secMap = new Map((securities || []).map(s => [s.id, s]));
   const acctMap = new Map((accounts || []).map(a => [a.id, a]));
+  void acctMap;
 
   const filteredAccounts = (accounts || []).filter(a =>
     portfolioFilter === 'all' || a.portfolioId === portfolioFilter
@@ -54,6 +56,7 @@ export default function Reports() {
   }
   const assetData = Array.from(allocationByAsset.entries()).map(([name, value]) => ({ name, value }));
   const typeData = Array.from(allocationByType.entries()).map(([name, value]) => ({ name, value }));
+  void typeData;
   const acctTypeData = (['RRSP', 'TFSA', 'RESP', 'Non-Registered', 'LIRA', 'FHSA'] as const).map(type => {
     const accts = filteredAccounts.filter(a => a.type === type);
     const value = accts.reduce((sum, a) => {
@@ -67,7 +70,7 @@ export default function Reports() {
     return { name: type, value };
   }).filter(d => d.value > 0);
 
-  // Performance - portfolio value by month from transactions
+  // Performance
   const monthlyMap = new Map<string, number>();
   let runningValue = 0;
   const filteredTx = (transactions || [])
@@ -84,17 +87,22 @@ export default function Reports() {
   }
   const perfData = Array.from(monthlyMap.entries()).map(([month, value]) => ({ month, value }));
 
-  // Modified Dietz
   const portTx = filteredTx.filter(t => t.date >= startDate && t.date <= endDate);
-  const startVal = 0;
   const totalBook = (holdings || []).filter(h => filteredAccountIds.has(h.accountId)).reduce((s, h) => s + h.bookValue, 0);
   const totalMkt = (holdings || []).filter(h => filteredAccountIds.has(h.accountId)).reduce((s, h) => {
     const sec = secMap.get(h.securityId);
     const price = sec ? priceMap.get(sec.ticker) : null;
     return s + (price ? h.shares * price.price : h.bookValue);
   }, 0);
-  const mdietz = calculateModifiedDietz(portTx, startVal, totalMkt, startDate, endDate);
+  const cashTotal = filteredAccounts.reduce((s, a) => s + a.cashBalance, 0);
+  const totalPortfolioValue = totalMkt + cashTotal;
+
+  const mdietz = calculateModifiedDietz(portTx, 0, totalMkt, startDate, endDate);
   const { dollar: totalGain, percent: totalGainPct } = calculateDollarGainLoss(totalBook, totalMkt);
+
+  // XIRR — Money-Weighted Return
+  const mwrFlows = buildXirrFlows(filteredTx, totalPortfolioValue);
+  const mwr = xirr(mwrFlows);
 
   // Income breakdown
   const incomeTxs = (transactions || []).filter(t => {
@@ -115,13 +123,29 @@ export default function Reports() {
   const incomeByTypeData = Array.from(incomeByType.entries()).map(([name, value]) => ({ name, value }));
   const totalIncome = incomeTxs.reduce((s, t) => s + t.amount, 0);
 
-  // Capital gains
-  const years = Array.from(new Set((transactions || []).map(t => t.date.substring(0, 4)))).sort().reverse();
-  const capitalGainsData = years.map(yr => {
-    const sells = (transactions || []).filter(t => filteredAccountIds.has(t.accountId) && t.type === 'Sell' && t.date.startsWith(yr));
-    const realized = sells.reduce((s, t) => s + t.amount, 0);
-    return { year: yr, realized, unrealized: totalGain };
-  });
+  // Per-sell realized capital gains
+  const realizedRows = useMemo(() => {
+    const allTx = transactions || [];
+    const secs = securities || [];
+    const rows = [];
+    for (const sec of secs) {
+      const secRows = calculateRealizedGainsPerSell(allTx, sec.id, sec.ticker);
+      rows.push(...secRows);
+    }
+    return rows.sort((a, b) => b.date.localeCompare(a.date));
+  }, [transactions, securities]);
+
+  const years = useMemo(() =>
+    Array.from(new Set([
+      ...(transactions || []).map(t => t.date.substring(0, 4)),
+      ...realizedRows.map(r => String(r.year)),
+    ])).sort().reverse(),
+    [transactions, realizedRows],
+  );
+
+  const filteredGains = gainsYear === 'all' ? realizedRows : realizedRows.filter(r => r.year === Number(gainsYear));
+  const totalRealizedGain = filteredGains.reduce((s, r) => s + r.gain, 0);
+  const totalRealizedProceeds = filteredGains.reduce((s, r) => s + r.proceeds, 0);
 
   return (
     <div className="p-6 space-y-5">
@@ -131,7 +155,7 @@ export default function Reports() {
           <p className="text-muted-foreground text-sm">Asset allocation, performance, and income analysis</p>
         </div>
         <Select value={portfolioFilter} onValueChange={setPortfolioFilter}>
-          <SelectTrigger className="w-44" data-testid="select-reports-portfolio">
+          <SelectTrigger className="w-44">
             <SelectValue placeholder="All Portfolios" />
           </SelectTrigger>
           <SelectContent>
@@ -143,10 +167,10 @@ export default function Reports() {
 
       <Tabs defaultValue="allocation">
         <TabsList>
-          <TabsTrigger value="allocation" data-testid="tab-allocation">Asset Allocation</TabsTrigger>
-          <TabsTrigger value="performance" data-testid="tab-performance">Performance</TabsTrigger>
-          <TabsTrigger value="income" data-testid="tab-income">Income</TabsTrigger>
-          <TabsTrigger value="capgains" data-testid="tab-capgains">Capital Gains</TabsTrigger>
+          <TabsTrigger value="allocation">Asset Allocation</TabsTrigger>
+          <TabsTrigger value="performance">Performance</TabsTrigger>
+          <TabsTrigger value="income">Income</TabsTrigger>
+          <TabsTrigger value="capgains">Capital Gains</TabsTrigger>
         </TabsList>
 
         {/* Asset Allocation */}
@@ -183,28 +207,43 @@ export default function Reports() {
         <TabsContent value="performance" className="mt-4 space-y-5">
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
             {[
-              { label: 'Market Value', value: formatCurrency(totalMkt), sub: null },
-              { label: 'Book Value', value: formatCurrency(totalBook), sub: null },
+              { label: 'Market Value', value: formatCurrency(totalMkt), sub: null, color: undefined },
+              { label: 'Book Value', value: formatCurrency(totalBook), sub: null, color: undefined },
               { label: 'Total Gain/Loss', value: `${totalGain >= 0 ? '+' : ''}${formatCurrency(totalGain)}`, sub: formatPercent(totalGainPct), color: totalGain >= 0 ? 'text-emerald-600' : 'text-rose-600' },
-              { label: 'Modified Dietz Return', value: formatPercent(mdietz), sub: `${startDate} — ${endDate}`, color: mdietz >= 0 ? 'text-emerald-600' : 'text-rose-600' },
+              { label: 'MWR (annualized)', value: mwr !== null ? formatPercent(mwr * 100) : '—', sub: 'Money-weighted return', color: mwr !== null && mwr >= 0 ? 'text-emerald-600' : 'text-rose-600' },
             ].map(card => (
               <div key={card.label} className="rounded-lg border border-border p-4">
                 <p className="text-xs text-muted-foreground">{card.label}</p>
-                <p className={cn('text-xl font-bold mt-1', card.color)}>{card.value}</p>
+                <p className={cn('text-xl font-bold mt-1 num', card.color)}>{card.value}</p>
                 {card.sub && <p className="text-xs text-muted-foreground mt-0.5">{card.sub}</p>}
               </div>
             ))}
           </div>
+
+          <div className="grid grid-cols-2 lg:grid-cols-2 gap-4 mt-2">
+            <div className="rounded-lg border border-border p-4">
+              <p className="text-xs text-muted-foreground">Modified Dietz Return</p>
+              <p className={cn('text-xl font-bold mt-1 num', mdietz >= 0 ? 'text-emerald-600' : 'text-rose-600')}>{formatPercent(mdietz)}</p>
+              <p className="text-xs text-muted-foreground mt-0.5">{startDate} — {endDate}</p>
+            </div>
+            <div className="rounded-lg border border-border p-4">
+              <p className="text-xs text-muted-foreground">Total Portfolio Value</p>
+              <p className="text-xl font-bold mt-1 num">{formatCurrency(totalPortfolioValue)}</p>
+              <p className="text-xs text-muted-foreground mt-0.5">incl. {formatCurrency(cashTotal)} cash</p>
+            </div>
+          </div>
+
           <div className="flex gap-3">
             <div className="space-y-1">
               <Label className="text-xs">Start Date</Label>
-              <Input type="date" className="h-8 text-sm w-36" value={startDate} onChange={e => setStartDate(e.target.value)} data-testid="input-perf-start" />
+              <Input type="date" className="h-8 text-sm w-36" value={startDate} onChange={e => setStartDate(e.target.value)} />
             </div>
             <div className="space-y-1">
               <Label className="text-xs">End Date</Label>
-              <Input type="date" className="h-8 text-sm w-36" value={endDate} onChange={e => setEndDate(e.target.value)} data-testid="input-perf-end" />
+              <Input type="date" className="h-8 text-sm w-36" value={endDate} onChange={e => setEndDate(e.target.value)} />
             </div>
           </div>
+
           <div>
             <h3 className="font-semibold text-sm mb-3">Portfolio Value Over Time (Invested)</h3>
             {perfData.length > 0 ? (
@@ -227,7 +266,7 @@ export default function Reports() {
         <TabsContent value="income" className="mt-4 space-y-5">
           <div className="flex gap-3 flex-wrap">
             <Select value={incomeType} onValueChange={setIncomeType}>
-              <SelectTrigger className="w-44" data-testid="select-income-type"><SelectValue placeholder="All Types" /></SelectTrigger>
+              <SelectTrigger className="w-44"><SelectValue placeholder="All Types" /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">All Income Types</SelectItem>
                 {INCOME_TYPES.map(t => <SelectItem key={t} value={t}>{t}</SelectItem>)}
@@ -235,7 +274,7 @@ export default function Reports() {
               </SelectContent>
             </Select>
             <Select value={incomeYear} onValueChange={setIncomeYear}>
-              <SelectTrigger className="w-28" data-testid="select-income-year"><SelectValue placeholder="All Years" /></SelectTrigger>
+              <SelectTrigger className="w-28"><SelectValue placeholder="All Years" /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">All Years</SelectItem>
                 {years.map(y => <SelectItem key={y} value={y}>{y}</SelectItem>)}
@@ -246,7 +285,7 @@ export default function Reports() {
           <div className="grid grid-cols-2 gap-4">
             <div className="rounded-lg border border-border p-4">
               <p className="text-xs text-muted-foreground">Total Income</p>
-              <p className="text-xl font-bold text-emerald-600 mt-1">+{formatCurrency(totalIncome)}</p>
+              <p className="text-xl font-bold text-emerald-600 mt-1 num">+{formatCurrency(totalIncome)}</p>
             </div>
             <div className="rounded-lg border border-border p-4">
               <p className="text-xs text-muted-foreground">Transactions</p>
@@ -284,10 +323,13 @@ export default function Reports() {
                   {incomeByTypeData.map(row => (
                     <tr key={row.name} className="border-b border-border last:border-0">
                       <td className="px-3 py-2 text-xs">{row.name}</td>
-                      <td className="px-3 py-2 text-right text-xs font-mono font-semibold">{formatCurrency(row.value)}</td>
+                      <td className="px-3 py-2 text-right text-xs num font-semibold">{formatCurrency(row.value)}</td>
                       <td className="px-3 py-2 text-right text-xs text-muted-foreground">{totalIncome > 0 ? ((row.value / totalIncome) * 100).toFixed(1) : 0}%</td>
                     </tr>
                   ))}
+                  {incomeByTypeData.length === 0 && (
+                    <tr><td colSpan={3} className="text-center py-8 text-muted-foreground text-xs">No income data</td></tr>
+                  )}
                 </tbody>
               </table>
             </div>
@@ -296,39 +338,70 @@ export default function Reports() {
 
         {/* Capital Gains */}
         <TabsContent value="capgains" className="mt-4 space-y-5">
-          <div className="grid grid-cols-2 gap-4">
-            <div className="rounded-lg border border-border p-4">
-              <p className="text-xs text-muted-foreground">Unrealized Gain/Loss</p>
-              <p className={cn('text-xl font-bold mt-1', totalGain >= 0 ? 'text-emerald-600' : 'text-rose-600')}>
-                {totalGain >= 0 ? '+' : ''}{formatCurrency(totalGain)}
-              </p>
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex gap-4">
+              <div className="rounded-lg border border-border p-4 flex-1">
+                <p className="text-xs text-muted-foreground">Unrealized Gain/Loss</p>
+                <p className={cn('text-xl font-bold mt-1 num', totalGain >= 0 ? 'text-emerald-600' : 'text-rose-600')}>
+                  {totalGain >= 0 ? '+' : ''}{formatCurrency(totalGain)}
+                </p>
+                <p className="text-xs text-muted-foreground mt-0.5">{formatPercent(totalGainPct)} return</p>
+              </div>
+              <div className="rounded-lg border border-border p-4 flex-1">
+                <p className="text-xs text-muted-foreground">
+                  Realized Gain/Loss {gainsYear !== 'all' ? gainsYear : '(all years)'}
+                </p>
+                <p className={cn('text-xl font-bold mt-1 num', totalRealizedGain >= 0 ? 'text-emerald-600' : 'text-rose-600')}>
+                  {totalRealizedGain >= 0 ? '+' : ''}{formatCurrency(totalRealizedGain)}
+                </p>
+                <p className="text-xs text-muted-foreground mt-0.5">on {formatCurrency(totalRealizedProceeds)} proceeds</p>
+              </div>
             </div>
-            <div className="rounded-lg border border-border p-4">
-              <p className="text-xs text-muted-foreground">Unrealized Return</p>
-              <p className={cn('text-xl font-bold mt-1', totalGainPct >= 0 ? 'text-emerald-600' : 'text-rose-600')}>
-                {formatPercent(totalGainPct)}
-              </p>
-            </div>
+            <Select value={gainsYear} onValueChange={setGainsYear}>
+              <SelectTrigger className="w-28"><SelectValue placeholder="All Years" /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All Years</SelectItem>
+                {years.map(y => <SelectItem key={y} value={y}>{y}</SelectItem>)}
+              </SelectContent>
+            </Select>
           </div>
 
           <div>
-            <h3 className="font-semibold text-sm mb-2">Realized Gains by Year (Sells)</h3>
+            <h3 className="font-semibold text-sm mb-2">Realized Capital Gains (ACB method, per-sell)</h3>
             <div className="rounded-lg border border-border overflow-hidden">
               <table className="w-full text-sm">
                 <thead><tr className="bg-muted/50 border-b border-border">
-                  <th className="text-left px-3 py-2.5 text-xs font-medium text-muted-foreground">Tax Year</th>
-                  <th className="text-right px-3 py-2.5 text-xs font-medium text-muted-foreground">Proceeds from Sells</th>
+                  <th className="text-left px-3 py-2.5 text-xs font-medium text-muted-foreground">Date</th>
+                  <th className="text-left px-3 py-2.5 text-xs font-medium text-muted-foreground">Symbol</th>
+                  <th className="text-right px-3 py-2.5 text-xs font-medium text-muted-foreground">Proceeds</th>
+                  <th className="text-right px-3 py-2.5 text-xs font-medium text-muted-foreground">ACB</th>
+                  <th className="text-right px-3 py-2.5 text-xs font-medium text-muted-foreground">Gain/Loss</th>
                 </tr></thead>
                 <tbody>
-                  {capitalGainsData.filter(r => r.realized > 0).length === 0 && (
-                    <tr><td colSpan={2} className="text-center py-8 text-muted-foreground text-xs">No realized gains recorded</td></tr>
+                  {filteredGains.length === 0 && (
+                    <tr><td colSpan={5} className="text-center py-8 text-muted-foreground text-xs">No realized gains recorded for this period</td></tr>
                   )}
-                  {capitalGainsData.filter(r => r.realized > 0).map(row => (
-                    <tr key={row.year} className="border-b border-border last:border-0">
-                      <td className="px-3 py-2 text-xs font-mono">{row.year}</td>
-                      <td className="px-3 py-2 text-right text-xs font-mono font-semibold">{formatCurrency(row.realized)}</td>
+                  {filteredGains.map((row, i) => (
+                    <tr key={i} className="border-b border-border last:border-0">
+                      <td className="px-3 py-2 text-xs num">{row.date}</td>
+                      <td className="px-3 py-2 text-xs font-semibold num">{row.ticker}</td>
+                      <td className="px-3 py-2 text-right text-xs num">{formatCurrency(row.proceeds)}</td>
+                      <td className="px-3 py-2 text-right text-xs num text-muted-foreground">{formatCurrency(row.acbRemoved)}</td>
+                      <td className={cn('px-3 py-2 text-right text-xs num font-semibold', row.gain >= 0 ? 'text-emerald-600' : 'text-rose-600')}>
+                        {row.gain >= 0 ? '+' : ''}{formatCurrency(row.gain)}
+                      </td>
                     </tr>
                   ))}
+                  {filteredGains.length > 0 && (
+                    <tr className="bg-muted/30 font-semibold">
+                      <td className="px-3 py-2 text-xs" colSpan={2}>Total</td>
+                      <td className="px-3 py-2 text-right text-xs num">{formatCurrency(totalRealizedProceeds)}</td>
+                      <td className="px-3 py-2 text-right text-xs num text-muted-foreground">{formatCurrency(filteredGains.reduce((s, r) => s + r.acbRemoved, 0))}</td>
+                      <td className={cn('px-3 py-2 text-right text-xs num', totalRealizedGain >= 0 ? 'text-emerald-600' : 'text-rose-600')}>
+                        {totalRealizedGain >= 0 ? '+' : ''}{formatCurrency(totalRealizedGain)}
+                      </td>
+                    </tr>
+                  )}
                 </tbody>
               </table>
             </div>
@@ -351,9 +424,9 @@ export default function Reports() {
                     const sec = t.securityId ? secMap.get(t.securityId) : null;
                     return (
                       <tr key={t.id} className="border-b border-border last:border-0">
-                        <td className="px-3 py-2 text-xs font-mono">{t.date.split('T')[0]}</td>
-                        <td className="px-3 py-2 text-xs font-mono font-semibold">{sec?.ticker || '—'}</td>
-                        <td className="px-3 py-2 text-right text-xs font-mono">{formatCurrency(t.amount, t.currency)}</td>
+                        <td className="px-3 py-2 text-xs num">{t.date.split('T')[0]}</td>
+                        <td className="px-3 py-2 text-xs num font-semibold">{sec?.ticker || '—'}</td>
+                        <td className="px-3 py-2 text-right text-xs num">{formatCurrency(t.amount, t.currency)}</td>
                       </tr>
                     );
                   })}

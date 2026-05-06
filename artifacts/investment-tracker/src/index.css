@@ -172,4 +172,8 @@
   body {
     @apply font-sans antialiased bg-background text-foreground;
   }
+  .num {
+    font-variant-numeric: tabular-nums;
+    font-family: var(--app-font-mono);
+  }
 }

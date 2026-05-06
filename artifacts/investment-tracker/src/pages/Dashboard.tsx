@@ -2,7 +2,7 @@ import { useLiveQuery } from 'dexie-react-hooks';
 import { useState, useEffect } from 'react';
 import { db } from '@/lib/db';
 import { formatCurrency, formatPercent } from '@/lib/csvUtils';
-import { calculateDollarGainLoss } from '@/lib/calculations';
+import { calculateDollarGainLoss, buildXirrFlows, xirr } from '@/lib/calculations';
 import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer, Legend } from 'recharts';
 import { TrendingUp, TrendingDown, DollarSign, RefreshCw, Calendar, Wallet } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -12,6 +12,8 @@ import { refreshAllPrices } from '@/lib/marketData';
 import { cn } from '@/lib/utils';
 
 const CHART_COLORS = ['#10b981', '#3b82f6', '#f59e0b', '#8b5cf6', '#ef4444', '#06b6d4', '#ec4899'];
+
+void DollarSign;
 
 export default function Dashboard() {
   const [refreshing, setRefreshing] = useState(false);
@@ -24,6 +26,7 @@ export default function Dashboard() {
   const prices = useLiveQuery(() => db.priceCache.toArray(), []);
   const transactions = useLiveQuery(() =>
     db.transactions.orderBy('date').reverse().limit(10).toArray(), []);
+  const allTransactions = useLiveQuery(() => db.transactions.toArray(), []);
   const contributions = useLiveQuery(() => db.contributionRecords.toArray(), []);
 
   useEffect(() => {
@@ -60,7 +63,13 @@ export default function Dashboard() {
   });
 
   const cashTotal = filteredAccounts.reduce((sum, a) => sum + a.cashBalance, 0);
+  const totalPortfolioValue = totalMarketValue + cashTotal;
   const { dollar: totalGain, percent: totalGainPct } = calculateDollarGainLoss(totalBookValue, totalMarketValue);
+
+  // Money-Weighted Return (XIRR)
+  const filteredTx = (allTransactions || []).filter(t => filteredAccountIds.has(t.accountId));
+  const xirrFlows = buildXirrFlows(filteredTx, totalPortfolioValue);
+  const mwr = xirr(xirrFlows);
 
   // Asset allocation by assetClass
   const allocationMap = new Map<string, number>();
@@ -113,12 +122,10 @@ export default function Dashboard() {
           <p className="text-muted-foreground text-sm mt-0.5">Portfolio overview as of today</p>
         </div>
         <div className="flex items-center gap-3">
-          {/* Portfolio selector */}
           <div className="flex gap-1">
             {(portfolios || []).map(p => (
               <button
                 key={p.id}
-                data-testid={`portfolio-tab-${p.id}`}
                 onClick={() => setSelectedPortfolioId(p.id)}
                 className={cn(
                   'px-3 py-1.5 rounded-md text-sm font-medium transition-colors',
@@ -131,7 +138,6 @@ export default function Dashboard() {
               </button>
             ))}
             <button
-              data-testid="portfolio-tab-all"
               onClick={() => setSelectedPortfolioId(null)}
               className={cn(
                 'px-3 py-1.5 rounded-md text-sm font-medium transition-colors',
@@ -148,7 +154,6 @@ export default function Dashboard() {
             size="sm"
             onClick={handleRefreshPrices}
             disabled={refreshing}
-            data-testid="button-refresh-prices"
           >
             <RefreshCw className={cn('h-3.5 w-3.5 mr-1.5', refreshing && 'animate-spin')} />
             {refreshing ? 'Refreshing...' : 'Refresh Prices'}
@@ -156,37 +161,37 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* Summary Cards */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <Card data-testid="card-market-value">
+      {/* Summary Cards — 5 cards: market value, book, gain/loss, today, MWR */}
+      <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
+        <Card>
           <CardContent className="p-4">
             <p className="text-xs text-muted-foreground uppercase tracking-wide font-medium">Market Value</p>
-            <p className="text-2xl font-bold mt-1">{formatCurrency(totalMarketValue + cashTotal)}</p>
+            <p className="text-2xl font-bold mt-1 num">{formatCurrency(totalPortfolioValue)}</p>
             <p className="text-xs text-muted-foreground mt-1">incl. {formatCurrency(cashTotal)} cash</p>
           </CardContent>
         </Card>
-        <Card data-testid="card-book-value">
+        <Card>
           <CardContent className="p-4">
             <p className="text-xs text-muted-foreground uppercase tracking-wide font-medium">Book Value</p>
-            <p className="text-2xl font-bold mt-1">{formatCurrency(totalBookValue)}</p>
+            <p className="text-2xl font-bold mt-1 num">{formatCurrency(totalBookValue)}</p>
             <p className="text-xs text-muted-foreground mt-1">Adjusted cost base</p>
           </CardContent>
         </Card>
-        <Card data-testid="card-total-gain">
+        <Card>
           <CardContent className="p-4">
-            <p className="text-xs text-muted-foreground uppercase tracking-wide font-medium">Total Gain/Loss</p>
-            <p className={cn('text-2xl font-bold mt-1', totalGain >= 0 ? 'text-emerald-600' : 'text-rose-600')}>
+            <p className="text-xs text-muted-foreground uppercase tracking-wide font-medium">Unrealized Gain</p>
+            <p className={cn('text-2xl font-bold mt-1 num', totalGain >= 0 ? 'text-emerald-600' : 'text-rose-600')}>
               {totalGain >= 0 ? '+' : ''}{formatCurrency(totalGain)}
             </p>
-            <p className={cn('text-xs mt-1', totalGain >= 0 ? 'text-emerald-500' : 'text-rose-500')}>
+            <p className={cn('text-xs mt-1 num', totalGain >= 0 ? 'text-emerald-500' : 'text-rose-500')}>
               {formatPercent(totalGainPct)}
             </p>
           </CardContent>
         </Card>
-        <Card data-testid="card-today-change">
+        <Card>
           <CardContent className="p-4">
             <p className="text-xs text-muted-foreground uppercase tracking-wide font-medium">Today's Change</p>
-            <p className={cn('text-2xl font-bold mt-1', todayChange >= 0 ? 'text-emerald-600' : 'text-rose-600')}>
+            <p className={cn('text-2xl font-bold mt-1 num', todayChange >= 0 ? 'text-emerald-600' : 'text-rose-600')}>
               {todayChange >= 0 ? '+' : ''}{formatCurrency(todayChange)}
             </p>
             <div className="flex items-center gap-1 mt-1">
@@ -197,11 +202,20 @@ export default function Dashboard() {
             </div>
           </CardContent>
         </Card>
+        <Card>
+          <CardContent className="p-4">
+            <p className="text-xs text-muted-foreground uppercase tracking-wide font-medium">MWR (annualized)</p>
+            <p className={cn('text-2xl font-bold mt-1 num', mwr === null ? '' : mwr >= 0 ? 'text-emerald-600' : 'text-rose-600')}>
+              {mwr !== null ? formatPercent(mwr * 100) : '—'}
+            </p>
+            <p className="text-xs text-muted-foreground mt-1">Money-weighted return</p>
+          </CardContent>
+        </Card>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         {/* Asset Allocation Chart */}
-        <Card className="lg:col-span-2" data-testid="chart-asset-allocation">
+        <Card className="lg:col-span-2">
           <CardHeader className="pb-2">
             <CardTitle className="text-base">Asset Allocation</CardTitle>
           </CardHeader>
@@ -236,7 +250,7 @@ export default function Dashboard() {
         </Card>
 
         {/* Contribution Summary */}
-        <Card data-testid="card-contributions">
+        <Card>
           <CardHeader className="pb-2">
             <CardTitle className="text-base flex items-center gap-2">
               <Calendar className="h-4 w-4" />
@@ -249,14 +263,14 @@ export default function Dashboard() {
                 <p className="text-sm font-medium">RRSP</p>
                 <p className="text-xs text-muted-foreground">Registered Retirement</p>
               </div>
-              <p className="font-mono text-sm font-semibold">{formatCurrency(rrspContrib)}</p>
+              <p className="num text-sm font-semibold">{formatCurrency(rrspContrib)}</p>
             </div>
             <div className="flex items-center justify-between py-2 border-b border-border">
               <div>
                 <p className="text-sm font-medium">TFSA</p>
                 <p className="text-xs text-muted-foreground">Tax-Free Savings</p>
               </div>
-              <p className="font-mono text-sm font-semibold">{formatCurrency(tfsaContrib)}</p>
+              <p className="num text-sm font-semibold">{formatCurrency(tfsaContrib)}</p>
             </div>
             <div className="pt-2">
               <p className="text-xs text-muted-foreground">Cash by Account</p>
@@ -264,7 +278,7 @@ export default function Dashboard() {
                 {filteredAccounts.map(a => (
                   <div key={a.id} className="flex items-center justify-between">
                     <span className="text-xs text-muted-foreground truncate max-w-[110px]">{a.name}</span>
-                    <span className="text-xs font-mono">{formatCurrency(a.cashBalance, a.currency)}</span>
+                    <span className="text-xs num">{formatCurrency(a.cashBalance, a.currency)}</span>
                   </div>
                 ))}
               </div>
@@ -275,7 +289,7 @@ export default function Dashboard() {
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         {/* Top Movers */}
-        <Card data-testid="card-top-movers">
+        <Card>
           <CardHeader className="pb-2">
             <CardTitle className="text-base">Top Movers</CardTitle>
           </CardHeader>
@@ -294,10 +308,10 @@ export default function Dashboard() {
                     </div>
                   </div>
                   <div className="text-right">
-                    <p className="text-sm font-mono font-semibold text-emerald-600">
+                    <p className="text-sm num font-semibold text-emerald-600">
                       +{formatCurrency(h.gain)}
                     </p>
-                    <p className="text-xs text-emerald-500">{formatPercent(h.gainPct)}</p>
+                    <p className="text-xs num text-emerald-500">{formatPercent(h.gainPct)}</p>
                   </div>
                 </div>
               ))}
@@ -311,10 +325,10 @@ export default function Dashboard() {
                     </div>
                   </div>
                   <div className="text-right">
-                    <p className="text-sm font-mono font-semibold text-rose-600">
+                    <p className="text-sm num font-semibold text-rose-600">
                       {formatCurrency(h.gain)}
                     </p>
-                    <p className="text-xs text-rose-500">{formatPercent(h.gainPct)}</p>
+                    <p className="text-xs num text-rose-500">{formatPercent(h.gainPct)}</p>
                   </div>
                 </div>
               ))}
@@ -323,7 +337,7 @@ export default function Dashboard() {
         </Card>
 
         {/* Recent Transactions */}
-        <Card data-testid="card-recent-transactions">
+        <Card>
           <CardHeader className="pb-2">
             <CardTitle className="text-base">Recent Transactions</CardTitle>
           </CardHeader>
@@ -337,7 +351,7 @@ export default function Dashboard() {
                 const acct = accountMap.get(t.accountId);
                 const colorClass = typeColors[t.type] || typeColors.default;
                 return (
-                  <div key={t.id} data-testid={`row-transaction-${t.id}`}
+                  <div key={t.id}
                     className="flex items-center justify-between py-2 border-b border-border last:border-0">
                     <div className="flex items-center gap-2 min-w-0">
                       <Badge className={cn('text-xs px-1.5 py-0 font-medium border-0 flex-shrink-0', colorClass)}>
@@ -348,7 +362,7 @@ export default function Dashboard() {
                         <p className="text-xs text-muted-foreground">{t.date.split('T')[0]}</p>
                       </div>
                     </div>
-                    <p className="text-xs font-mono font-medium flex-shrink-0 ml-2">
+                    <p className="text-xs num font-medium flex-shrink-0 ml-2">
                       {formatCurrency(t.amount, t.currency)}
                     </p>
                   </div>

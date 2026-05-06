@@ -1,27 +1,61 @@
 import { db, type Holding, type Security, type PriceCache } from './db';
 
+const BASE = import.meta.env.BASE_URL ?? '/investment-tracker/';
+
+function apiUrl(path: string) {
+  // Route through the shared proxy to the api-server (avoids CORS on direct Yahoo calls)
+  return `/api/${path}`;
+}
+
+export type Quote = { symbol: string; price: number; change: number; changePct: number };
+
+export async function fetchQuotes(tickers: string[]): Promise<Quote[]> {
+  if (tickers.length === 0) return [];
+  try {
+    const res = await fetch(apiUrl(`quotes?symbols=${encodeURIComponent(tickers.join(','))}`));
+    if (!res.ok) throw new Error(`Quote fetch failed: ${res.status}`);
+    const data = await res.json() as { quotes: Quote[] };
+    return data.quotes;
+  } catch (err) {
+    console.warn('[marketData] API proxy unavailable, falling back to direct Yahoo Finance', err);
+    return fetchQuotesDirect(tickers);
+  }
+}
+
+async function fetchQuotesDirect(tickers: string[]): Promise<Quote[]> {
+  const results: Quote[] = [];
+  await Promise.allSettled(tickers.map(async (ticker) => {
+    try {
+      const r = await fetch(
+        `https://query2.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}?interval=1d&range=1d`,
+      );
+      if (!r.ok) return;
+      const data = await r.json();
+      const meta = data?.chart?.result?.[0]?.meta;
+      if (!meta) return;
+      const price = meta.regularMarketPrice ?? 0;
+      const prev = meta.chartPreviousClose ?? price;
+      results.push({ symbol: ticker, price, change: price - prev, changePct: prev ? (price - prev) / prev : 0 });
+    } catch {
+      // ignore
+    }
+  }));
+  return results;
+}
+
 export async function fetchPrice(ticker: string): Promise<PriceCache | null> {
   try {
-    const response = await fetch(`https://query2.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}?interval=1d&range=1d`);
-    if (!response.ok) return null;
-    const data = await response.json();
-    if (!data.chart?.result?.[0]) return null;
-    
-    const result = data.chart.result[0];
-    const price = result.meta.regularMarketPrice;
-    const previousClose = result.meta.chartPreviousClose;
-    const currency = result.meta.currency === 'CAD' ? 'CAD' : 'USD';
-    
-    const change = price - previousClose;
-    const changePercent = (change / previousClose) * 100;
+    const quotes = await fetchQuotes([ticker]);
+    const q = quotes.find(x => x.symbol === ticker);
+    if (!q) return null;
 
     const cacheEntry: PriceCache = {
       ticker,
-      price,
-      currency,
-      change,
-      changePercent,
-      lastFetched: new Date().toISOString()
+      price: q.price,
+      currency: ticker.endsWith('.TO') ? 'CAD' : 'USD',
+      change: q.change,
+      changePercent: q.changePct * 100,
+      lastFetched: new Date().toISOString(),
     };
 
     await db.priceCache.put(cacheEntry);
@@ -35,7 +69,7 @@ export async function fetchPrice(ticker: string): Promise<PriceCache | null> {
 export async function refreshAllPrices(holdings: Holding[], securities: Security[]) {
   const securityMap = new Map(securities.map(s => [s.id, s]));
   const tickersToFetch = new Set<string>();
-  
+
   for (const holding of holdings) {
     const security = securityMap.get(holding.securityId);
     if (security && security.ticker && security.type !== 'Cash') {
@@ -43,6 +77,27 @@ export async function refreshAllPrices(holdings: Holding[], securities: Security
     }
   }
 
-  const promises = Array.from(tickersToFetch).map(ticker => fetchPrice(ticker));
-  await Promise.allSettled(promises);
+  const tickers = Array.from(tickersToFetch);
+  if (tickers.length === 0) return;
+
+  const quotes = await fetchQuotes(tickers);
+  const qMap = new Map(quotes.map(q => [q.symbol, q]));
+
+  await Promise.allSettled(
+    tickers.map(async (ticker) => {
+      const q = qMap.get(ticker);
+      if (!q) return;
+      const cacheEntry: PriceCache = {
+        ticker,
+        price: q.price,
+        currency: ticker.endsWith('.TO') ? 'CAD' : 'USD',
+        change: q.change,
+        changePercent: q.changePct * 100,
+        lastFetched: new Date().toISOString(),
+      };
+      await db.priceCache.put(cacheEntry);
+    }),
+  );
 }
+
+void BASE;

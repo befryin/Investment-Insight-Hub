@@ -261,7 +261,7 @@ export default function ImportPage() {
                   {parsed.map((r, i) => (
                     <tr key={i} data-testid={`row-preview-${i}`} className={cn('border-b border-border last:border-0', !r.valid && 'bg-rose-50')}>
                       <td className="px-3 py-1.5">
-                        {r.valid ? <Check className="h-3.5 w-3.5 text-emerald-500" /> : <AlertCircle className="h-3.5 w-3.5 text-rose-500" title={r.error} />}
+                        {r.valid ? <Check className="h-3.5 w-3.5 text-emerald-500" /> : <AlertCircle className="h-3.5 w-3.5 text-rose-500" aria-label={r.error} />}
                       </td>
                       <td className="px-3 py-1.5 font-mono">{r.date || <span className="text-rose-500">invalid</span>}</td>
                       <td className="px-3 py-1.5">{r.type}</td>
