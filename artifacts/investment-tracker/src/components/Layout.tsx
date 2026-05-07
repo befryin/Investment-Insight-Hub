@@ -1,7 +1,7 @@
 import { Link, useLocation } from 'wouter';
 import {
   LayoutDashboard, Briefcase, TrendingUp, List, Upload, Download,
-  PieChart, BarChart3, Wallet, Settings, ChevronRight
+  PieChart, BarChart3, Wallet, Settings, ChevronRight, Calculator
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -15,6 +15,7 @@ const NAV_ITEMS = [
   { path: '/distributions', label: 'Distributions', icon: PieChart },
   { path: '/reports', label: 'Reports', icon: BarChart3 },
   { path: '/contributions', label: 'Contributions', icon: Wallet },
+  { path: '/sell-calculator', label: 'Sell Calculator', icon: Calculator },
   { path: '/settings', label: 'Settings', icon: Settings },
 ];
 

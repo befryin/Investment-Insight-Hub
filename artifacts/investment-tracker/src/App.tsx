@@ -15,6 +15,7 @@ import Distributions from '@/pages/Distributions';
 import Reports from '@/pages/Reports';
 import Contributions from '@/pages/Contributions';
 import SettingsPage from '@/pages/Settings';
+import SellCalculator from '@/pages/SellCalculator';
 import NotFound from '@/pages/not-found';
 
 const queryClient = new QueryClient();
@@ -36,6 +37,7 @@ function AppRoutes() {
         <Route path="/distributions" component={Distributions} />
         <Route path="/reports" component={Reports} />
         <Route path="/contributions" component={Contributions} />
+        <Route path="/sell-calculator" component={SellCalculator} />
         <Route path="/settings" component={SettingsPage} />
         <Route component={NotFound} />
       </Switch>
