@@ -206,7 +206,7 @@ export default function ImportPage() {
                   <SelectTrigger className="w-56" data-testid={`select-mapping-${field.key}`}><SelectValue placeholder="Not mapped" /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="none">— Not mapped —</SelectItem>
-                    {headers.map(h => <SelectItem key={h} value={h}>{h}</SelectItem>)}
+                    {headers.filter(h => h.trim()).map(h => <SelectItem key={h} value={h}>{h}</SelectItem>)}
                   </SelectContent>
                 </Select>
                 {mapping[field.key] && rawRows[0] && (

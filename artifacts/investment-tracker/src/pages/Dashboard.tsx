@@ -1,5 +1,5 @@
 import { useLiveQuery } from 'dexie-react-hooks';
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { db } from '@/lib/db';
 import { formatCurrency, formatPercent } from '@/lib/csvUtils';
 import { calculateDollarGainLoss, buildXirrFlows, xirr } from '@/lib/calculations';
@@ -11,6 +11,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { refreshAllPrices, fetchQuotes, fetchHistoricalPrices } from '@/lib/marketData';
 import { cn } from '@/lib/utils';
+import { BenchmarkChart } from '@/components/BenchmarkChart';
 
 const CHART_COLORS = ['#10b981', '#3b82f6', '#f59e0b', '#8b5cf6', '#ef4444', '#06b6d4', '#ec4899'];
 
@@ -93,6 +94,16 @@ export default function Dashboard() {
 
   // Fetch historical prices whenever the tickers in view change
   const tickerList = holdingDetails.map(h => h.sec?.ticker).filter(Boolean).join(',');
+
+  // Stable positions array for BenchmarkChart (avoids re-render loops)
+  const sharesKey = filteredHoldings.map(h => h.shares).join(',');
+  const positions = useMemo(() =>
+    holdingDetails
+      .filter(h => h.sec?.ticker && h.shares > 0)
+      .map(h => ({ ticker: h.sec!.ticker, shares: h.shares })),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [tickerList, sharesKey]
+  );
   const loadHistoricalPrices = useCallback(async (tickers: string[]) => {
     if (tickers.length === 0) return;
     setHistLoading(true);
@@ -338,6 +349,9 @@ export default function Dashboard() {
           })}
         </div>
       </div>
+
+      {/* Benchmark Comparison Chart */}
+      <BenchmarkChart positions={positions} cashTotal={cashTotal} />
 
       {/* Middle row: allocation + contributions */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
