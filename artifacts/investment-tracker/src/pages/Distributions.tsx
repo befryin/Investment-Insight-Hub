@@ -2,6 +2,7 @@ import { useLiveQuery } from 'dexie-react-hooks';
 import { useState, useMemo } from 'react';
 import { db, type DistributionImport } from '@/lib/db';
 import { parseCSV } from '@/lib/csvUtils';
+import * as XLSX from 'xlsx';
 import { formatCurrency } from '@/lib/csvUtils';
 import { Check, X, Upload, Globe, AlertCircle, Pencil, Save } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -44,6 +45,7 @@ export default function Distributions() {
   const [fetchUrl, setFetchUrl] = useState('');
   const [symbolHint, setSymbolHint] = useState('');
   const [provider, setProvider] = useState('ishares-ca');
+  const [fetchYear, setFetchYear] = useState(new Date().getFullYear().toString());
   const [fetching, setFetching] = useState(false);
   const [fetchedPreview, setFetchedPreview] = useState<Distribution[]>([]);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -84,23 +86,20 @@ export default function Distributions() {
     const holding = sec ? await db.holdings.where('securityId').equals(sec.id).first() : null;
     const accountId = holding?.accountId || accounts[0]?.id;
     if (accountId && sec) {
-      await db.transactions.add({
-        id: crypto.randomUUID(), accountId, securityId: sec.id,
-        date: item.exDate, type: 'Distribution', amount: item.totalAmount,
-        currency: 'CAD', approved: true,
-        distributionClassification: item.breakdown.dividend ? 'Dividend' :
-          item.breakdown.capitalGain ? 'Capital Gain' :
-          item.breakdown.returnOfCapital ? 'Return of Capital' :
-          item.breakdown.foreignIncome ? 'Foreign Income' : 'Other Income',
-        notes: `Distribution: ${[
-          item.breakdown.dividend ? `Div $${item.breakdown.dividend.toFixed(4)}` : '',
-          item.breakdown.capitalGain ? `CG $${item.breakdown.capitalGain.toFixed(4)}` : '',
-          item.breakdown.returnOfCapital ? `ROC $${item.breakdown.returnOfCapital.toFixed(4)}` : '',
-          item.breakdown.foreignIncome ? `Foreign $${item.breakdown.foreignIncome.toFixed(4)}` : '',
-          item.breakdown.otherIncome ? `Other $${item.breakdown.otherIncome.toFixed(4)}` : '',
-        ].filter(Boolean).join(', ')}`,
-        createdAt: new Date().toISOString(),
-      });
+      const baseTx = { accountId, securityId: sec.id, date: item.exDate, currency: 'CAD' as const, approved: true, createdAt: new Date().toISOString() };
+      const txs = [];
+      if (item.breakdown.dividend) txs.push({ ...baseTx, id: crypto.randomUUID(), type: 'Dividend' as const, amount: item.breakdown.dividend, distributionClassification: 'Dividend' as const, notes: 'Distribution: Dividend' });
+      if (item.breakdown.returnOfCapital) txs.push({ ...baseTx, id: crypto.randomUUID(), type: 'Return of Capital' as const, amount: item.breakdown.returnOfCapital, notes: 'Distribution: ROC' });
+      if (item.breakdown.capitalGain) txs.push({ ...baseTx, id: crypto.randomUUID(), type: 'Capital Gain Distribution' as const, amount: item.breakdown.capitalGain, notes: 'Distribution: Reinvested Capital Gain' });
+      if (item.breakdown.foreignIncome) txs.push({ ...baseTx, id: crypto.randomUUID(), type: 'Distribution' as const, amount: item.breakdown.foreignIncome, distributionClassification: 'Foreign Income' as const, notes: 'Distribution: Foreign Income' });
+      if (item.breakdown.otherIncome) txs.push({ ...baseTx, id: crypto.randomUUID(), type: 'Distribution' as const, amount: item.breakdown.otherIncome, distributionClassification: 'Other Income' as const, notes: 'Distribution: Other Income' });
+      
+      // If there are no breakdown parts, just add a generic distribution for total amount
+      if (txs.length === 0 && item.totalAmount > 0) {
+        txs.push({ ...baseTx, id: crypto.randomUUID(), type: 'Distribution' as const, amount: item.totalAmount, notes: 'Distribution' });
+      }
+      
+      await db.transactions.bulkAdd(txs);
     }
     toast({ title: `Approved distribution for ${item.ticker}` });
   }
@@ -145,17 +144,58 @@ export default function Distributions() {
   async function handleFile(file: File) {
     setImporting(true);
     try {
-      const { rows } = await parseCSV(file);
+      let rows: any[] = [];
+      if (file.name.toLowerCase().endsWith('.xlsx') || file.name.toLowerCase().endsWith('.xls')) {
+        const buffer = await file.arrayBuffer();
+        const workbook = XLSX.read(buffer, { type: 'array' });
+        const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
+        const rawJson = XLSX.utils.sheet_to_json(firstSheet, { header: 1 }) as any[][];
+        
+        let headerRowIdx = 0;
+        for (let i = 0; i < Math.min(20, rawJson.length); i++) {
+          const rowStr = (rawJson[i] || []).join(' ').toLowerCase();
+          if (rowStr.includes('ticker') || rowStr.includes('symbol') || rowStr.includes('fund')) {
+            headerRowIdx = i;
+            break;
+          }
+        }
+        
+        const headers = rawJson[headerRowIdx] || [];
+        for (let i = headerRowIdx + 1; i < rawJson.length; i++) {
+          const row = rawJson[i];
+          if (!row || row.length === 0) continue;
+          const obj: any = {};
+          headers.forEach((h: string, idx: number) => {
+            if (h) obj[h.toString().trim()] = row[idx];
+          });
+          rows.push(obj);
+        }
+      } else {
+        const parsed = await parseCSV(file);
+        rows = parsed.rows;
+      }
+
       const items: DistributionImport[] = rows.map(row => {
-        const ticker = (row['Ticker'] || row['ticker'] || row['Symbol'] || row['symbol'] || '').trim().toUpperCase();
-        const exDate = row['Ex Date'] || row['ex_date'] || row['Ex-Date'] || row['date'] || '';
+        const ticker = (row['Ticker'] || row['ticker'] || row['Symbol'] || row['symbol'] || row['Fund'] || '').toString().trim().toUpperCase();
+        let exDateRaw = row['Ex Date'] || row['ex_date'] || row['Ex-Date'] || row['date'] || row['Record Date'] || '';
+        if (typeof exDateRaw === 'number') {
+           // Excel date number
+           const date = new Date(Math.round((exDateRaw - 25569) * 86400 * 1000));
+           exDateRaw = date.toISOString().split('T')[0];
+        }
+        const exDate = exDateRaw.toString();
         const payDate = row['Pay Date'] || row['pay_date'] || '';
-        const total = parseFloat(row['Total'] || row['total'] || row['Amount'] || row['amount'] || '0') || 0;
-        const dividend = parseFloat(row['Dividend'] || row['dividend'] || row['Eligible Dividend'] || '0') || 0;
-        const capitalGain = parseFloat(row['Capital Gain'] || row['capital_gain'] || row['CG'] || '0') || 0;
-        const roc = parseFloat(row['Return of Capital'] || row['ROC'] || row['roc'] || '0') || 0;
-        const foreign = parseFloat(row['Foreign Income'] || row['foreign_income'] || '0') || 0;
-        const other = parseFloat(row['Other'] || row['other'] || '0') || 0;
+        
+        // Some files format amounts with $ or commas. Clean them up.
+        const cleanNum = (v: any) => parseFloat(v?.toString().replace(/[$ ,]/g, '') || '0') || 0;
+        
+        const total = cleanNum(row['Total'] || row['total'] || row['Amount'] || row['amount'] || row['Cash Distribution']);
+        const dividend = cleanNum(row['Dividend'] || row['dividend'] || row['Eligible Dividend']);
+        const capitalGain = cleanNum(row['Capital Gain'] || row['capital_gain'] || row['CG'] || row['Capital Gains']);
+        const roc = cleanNum(row['Return of Capital'] || row['ROC'] || row['roc']);
+        const foreign = cleanNum(row['Foreign Income'] || row['foreign_income']);
+        const other = cleanNum(row['Other'] || row['other'] || row['Interest']);
+        
         return {
           id: crypto.randomUUID(), ticker, exDate, payDate: payDate || undefined,
           totalAmount: total || dividend + capitalGain + roc + foreign + other,
@@ -165,31 +205,32 @@ export default function Distributions() {
           },
           status: 'pending' as const, importedAt: new Date().toISOString(),
         };
-      }).filter(i => i.ticker);
+      }).filter((i: any) => i.ticker && i.exDate);
       await db.distributionImports.bulkAdd(items);
       toast({ title: `Imported ${items.length} distribution records` });
-    } catch {
-      toast({ title: 'Error parsing file', variant: 'destructive' });
+    } catch (e) {
+      toast({ title: 'Error parsing file: ' + (e as Error).message, variant: 'destructive' });
     } finally {
       setImporting(false);
     }
   }
 
   async function fetchFromUrl() {
-    if (!fetchUrl.trim()) return;
+    let url = fetchUrl.trim();
+    if (!url) {
+      if (provider === 'vanguard-ca') url = 'https://fund-docs.vanguard.com/ETF-Distribution-History.xlsx';
+      else if (provider === 'bmo') url = `https://www.bmo.com/assets/pdfs/bmo-etfs-tax-distribution-history-${fetchYear}-en.xlsx`;
+      else if (provider === 'ishares-ca') url = `https://www.blackrock.com/ca/investors/en/literature/tax-information/distribution-characteristics-${fetchYear}-en.xlsx`;
+      else return;
+    }
     setFetching(true);
     setFetchedPreview([]);
     try {
-      const params = new URLSearchParams({ url: fetchUrl.trim() });
-      if (symbolHint.trim()) params.set('symbol', symbolHint.trim().toUpperCase());
-      const res = await fetch(`/api/etf-distributions?${params}`);
-      if (!res.ok) throw new Error(`API error ${res.status}`);
-      const data = await res.json() as { distributions: Distribution[]; error?: string };
-      if (data.error) throw new Error(data.error);
-      setFetchedPreview(data.distributions);
-      if (data.distributions.length === 0) {
-        toast({ title: 'No distributions found on that page. Try a different URL or provider.' });
-      }
+      const res = await fetch(`/api/proxy-file?url=${encodeURIComponent(url)}`);
+      if (!res.ok) throw new Error(`Failed to fetch file (HTTP ${res.status})`);
+      const blob = await res.blob();
+      const file = new File([blob], "downloaded.xlsx", { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+      await handleFile(file);
     } catch (e) {
       toast({ title: 'Fetch failed: ' + (e as Error).message, variant: 'destructive' });
     } finally {
@@ -453,9 +494,9 @@ export default function Distributions() {
               <Globe className="h-4 w-4 text-muted-foreground" />
               <h3 className="font-semibold text-sm">Fetch from ETF provider page</h3>
             </div>
-            <div className="flex items-center gap-2 text-xs text-amber-600 bg-amber-50 rounded p-2">
-              <AlertCircle className="h-3.5 w-3.5 flex-shrink-0" />
-              <span>Results depend on provider page structure — always review breakdown amounts before approving.</span>
+            <div className="flex items-center gap-2 text-xs text-blue-600 bg-blue-50 rounded p-2">
+              <Globe className="h-3.5 w-3.5 flex-shrink-0" />
+              <span>Downloads static XLSX files directly from the provider.</span>
             </div>
             <div className="grid md:grid-cols-3 gap-3 items-end">
               <div>
@@ -471,97 +512,26 @@ export default function Distributions() {
                 </Select>
               </div>
               <div>
-                <Label className="text-xs">Symbol hint (optional)</Label>
-                <Input placeholder="e.g. XAW.TO" className="h-8 text-sm" value={symbolHint} onChange={e => setSymbolHint(e.target.value.toUpperCase())} maxLength={20} />
+                <Label className="text-xs">Tax Year</Label>
+                <Select value={fetchYear} onValueChange={setFetchYear}>
+                  <SelectTrigger className="h-8 text-sm"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="2025">2025</SelectItem>
+                    <SelectItem value="2024">2024</SelectItem>
+                    <SelectItem value="2023">2023</SelectItem>
+                    <SelectItem value="2022">2022</SelectItem>
+                    <SelectItem value="2021">2021</SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
               <div>
-                <Label className="text-xs">Distribution page URL</Label>
-                <Input placeholder="https://..." className="h-8 text-sm" value={fetchUrl} onChange={e => setFetchUrl(e.target.value)} />
+                <Label className="text-xs">Or custom URL</Label>
+                <Input placeholder="Leave blank to use default" className="h-8 text-sm" value={fetchUrl} onChange={e => setFetchUrl(e.target.value)} />
               </div>
             </div>
-            <Button size="sm" onClick={fetchFromUrl} disabled={fetching || !fetchUrl.trim()}>
+            <Button size="sm" onClick={fetchFromUrl} disabled={fetching}>
               {fetching ? 'Fetching…' : 'Fetch distributions'}
             </Button>
-
-            {fetchedPreview.length > 0 && (
-              <div className="mt-3 space-y-2">
-                <div className="flex items-center justify-between">
-                  <p className="text-xs font-medium">Preview — {fetchedPreview.length} distribution(s) found</p>
-                  <Button size="sm" onClick={importFetched}>
-                    <Check className="h-3.5 w-3.5 mr-1" /> Add to Pending
-                  </Button>
-                </div>
-                <p className="text-xs text-muted-foreground">These will be added to Pending where you can edit and verify each breakdown before approving.</p>
-                <div className="rounded border border-border overflow-hidden">
-                  <table className="w-full text-xs">
-                    <thead><tr className="bg-muted/50 border-b border-border">
-                      <th className="text-left px-3 py-2 font-medium text-muted-foreground">Symbol</th>
-                      <th className="text-left px-3 py-2 font-medium text-muted-foreground">Ex-Date</th>
-                      <th className="text-right px-3 py-2 font-medium text-muted-foreground">Per Unit</th>
-                      <th className="text-right px-3 py-2 font-medium text-muted-foreground">Div</th>
-                      <th className="text-right px-3 py-2 font-medium text-amber-600">ROC</th>
-                      <th className="text-right px-3 py-2 font-medium text-muted-foreground">CG</th>
-                    </tr></thead>
-                    <tbody>
-                      {fetchedPreview.map((d, i) => (
-                        <tr key={i} className="border-b border-border last:border-0">
-                          <td className="px-3 py-1.5 num font-semibold">{d.symbol}</td>
-                          <td className="px-3 py-1.5">{d.ex_date || '—'}</td>
-                          <td className="px-3 py-1.5 text-right num">{formatCurrency(d.per_unit)}</td>
-                          <td className="px-3 py-1.5 text-right num text-muted-foreground">
-                            {(d.classifications.eligible_div || 0) + (d.classifications.non_eligible_div || 0) > 0
-                              ? formatCurrency((d.classifications.eligible_div || 0) + (d.classifications.non_eligible_div || 0))
-                              : '—'}
-                          </td>
-                          <td className="px-3 py-1.5 text-right num">
-                            {d.classifications.return_of_capital
-                              ? <span className="text-amber-700 font-medium">{formatCurrency(d.classifications.return_of_capital)}</span>
-                              : '—'}
-                          </td>
-                          <td className="px-3 py-1.5 text-right num text-muted-foreground">{d.classifications.capital_gains ? formatCurrency(d.classifications.capital_gains) : '—'}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            )}
-          </div>
-
-          {/* CSV Upload */}
-          <div className="space-y-3">
-            <h3 className="font-semibold text-sm">Upload CSV</h3>
-            <p className="text-sm text-muted-foreground">
-              Upload a CSV from your ETF provider. Expected columns: <code className="text-xs bg-muted px-1 py-0.5 rounded">Ticker, Ex Date, Total, Dividend, Capital Gain, Return of Capital, Foreign Income, Other</code>
-            </p>
-            <div
-              onDragOver={e => { e.preventDefault(); setDragging(true); }}
-              onDragLeave={() => setDragging(false)}
-              onDrop={async e => { e.preventDefault(); setDragging(false); const f = e.dataTransfer.files[0]; if (f) await handleFile(f); }}
-              className={cn('border-2 border-dashed rounded-xl p-12 text-center transition-colors cursor-pointer', dragging ? 'border-primary bg-primary/5' : 'border-border hover:border-primary/50')}
-              onClick={() => document.getElementById('dist-upload')?.click()}
-            >
-              <Upload className="h-7 w-7 mx-auto mb-2 text-muted-foreground" />
-              <p className="font-medium text-sm">{importing ? 'Importing…' : 'Drop CSV file here or click to browse'}</p>
-              <p className="text-xs text-muted-foreground mt-1">Supports iShares, Vanguard, BMO distribution schedules</p>
-              <input id="dist-upload" type="file" accept=".csv" className="hidden"
-                onChange={async e => { if (e.target.files?.[0]) await handleFile(e.target.files[0]); }} />
-            </div>
-            <div className="rounded-lg border border-border p-4 bg-muted/20">
-              <p className="text-xs font-medium mb-2">Add a sample distribution to test the workflow:</p>
-              <Button variant="outline" size="sm" onClick={async () => {
-                await db.distributionImports.add({
-                  id: crypto.randomUUID(), ticker: 'XAW.TO',
-                  exDate: new Date().toISOString().split('T')[0],
-                  totalAmount: 0.45,
-                  breakdown: { dividend: 0.30, capitalGain: 0.10, returnOfCapital: 0.05 },
-                  status: 'pending', importedAt: new Date().toISOString(),
-                });
-                toast({ title: 'Sample distribution added — see Pending tab' });
-              }}>
-                Add Sample Distribution
-              </Button>
-            </div>
           </div>
         </TabsContent>
 
