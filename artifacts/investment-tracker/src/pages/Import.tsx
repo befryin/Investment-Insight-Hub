@@ -40,6 +40,7 @@ export default function ImportPage() {
   const [headers, setHeaders] = useState<string[]>([]);
   const [rawRows, setRawRows] = useState<Record<string, string>[]>([]);
   const [mapping, setMapping] = useState<Record<string, string>>({});
+  const [actionMapping, setActionMapping] = useState<Record<string, string>>({});
   const [parsed, setParsed] = useState<ParsedRow[]>([]);
   const [selectedAccountId, setSelectedAccountId] = useState('');
   const [importing, setImporting] = useState(false);
@@ -89,12 +90,42 @@ export default function ImportPage() {
     if (file) await handleFile(file);
   }, []);
 
+  function buildActionMapping() {
+    if (!mapping.type) {
+      setStep('preview');
+      buildPreview();
+      return;
+    }
+    const uniqueActions = new Set<string>();
+    rawRows.forEach(r => {
+      const v = r[mapping.type]?.trim();
+      if (v) uniqueActions.add(v);
+    });
+    
+    if (uniqueActions.size === 0) {
+      setStep('preview');
+      buildPreview();
+      return;
+    }
+
+    const currentMapping = { ...actionMapping };
+    uniqueActions.forEach(action => {
+      if (!currentMapping[action]) {
+        const matched = TX_TYPES.find(t => t.toLowerCase() === action.toLowerCase());
+        currentMapping[action] = matched || '';
+      }
+    });
+    setActionMapping(currentMapping);
+    setStep('map-actions');
+  }
+
   function buildPreview() {
     const secByTicker = new Map((securities || []).map(s => [s.ticker.toUpperCase(), s]));
     const rows: ParsedRow[] = rawRows.map((r, i) => {
       const dateRaw = mapping.date ? r[mapping.date] : '';
       const date = parseDate(dateRaw);
-      const typeRaw = (mapping.type ? r[mapping.type] : '').trim();
+      const rawType = (mapping.type ? r[mapping.type] : '').trim();
+      const typeStr = actionMapping[rawType] || rawType || 'Buy';
       const amountRaw = parseFloat((mapping.amount ? r[mapping.amount] : '0').replace(/[$,]/g, '')) || 0;
       const ticker = mapping.ticker ? r[mapping.ticker]?.trim().toUpperCase() : undefined;
       const shares = mapping.shares ? parseFloat(r[mapping.shares]) || undefined : undefined;
@@ -108,7 +139,7 @@ export default function ImportPage() {
       if (!date) error = `Row ${i + 1}: Invalid date "${dateRaw}"`;
       if (!amountRaw && amountRaw !== 0) error = `Row ${i + 1}: Invalid amount`;
 
-      return { date, type: typeRaw || 'Buy', amount: amountRaw, ticker, shares, price, commission, currency, notes, classification, valid: !error, error };
+      return { date, type: typeStr, amount: amountRaw, ticker, shares, price, commission, currency, notes, classification, valid: !error, error };
     });
     setParsed(rows);
     setStep('preview');
@@ -141,9 +172,10 @@ export default function ImportPage() {
     toast({ title: `Imported ${txs.length} transactions` });
   }
 
-  const STEPS: { key: Step; label: string }[] = [
+  const STEPS: { key: string; label: string }[] = [
     { key: 'upload', label: 'Upload' },
     { key: 'map', label: 'Map Columns' },
+    { key: 'map-actions', label: 'Map Actions' },
     { key: 'preview', label: 'Preview' },
     { key: 'done', label: 'Complete' },
   ];
@@ -226,7 +258,34 @@ export default function ImportPage() {
           </div>
           <div className="flex gap-3">
             <Button variant="outline" onClick={() => setStep('upload')} data-testid="button-import-back">Back</Button>
-            <Button onClick={buildPreview} data-testid="button-import-preview">Preview Import</Button>
+            <Button onClick={buildActionMapping} data-testid="button-import-next">Next Step</Button>
+          </div>
+        </div>
+      )}
+
+      {/* Step 2.5: Map Actions */}
+      {step === 'map-actions' && (
+        <div className="space-y-5">
+          <p className="text-sm text-muted-foreground">Map the action types found in your CSV to the transaction types in the app.</p>
+          <div className="space-y-3">
+            {Object.keys(actionMapping).map(action => (
+              <div key={action} className="flex items-center gap-4">
+                <div className="w-48 flex items-center gap-1.5">
+                  <span className="text-sm font-medium">{action}</span>
+                </div>
+                <Select value={actionMapping[action] || 'none'} onValueChange={v => setActionMapping(m => ({ ...m, [action]: v === 'none' ? '' : v }))}>
+                  <SelectTrigger className="w-56"><SelectValue placeholder="Not mapped" /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="none">— Not mapped —</SelectItem>
+                    {TX_TYPES.map(t => <SelectItem key={t} value={t}>{t}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              </div>
+            ))}
+          </div>
+          <div className="flex gap-3 mt-6">
+            <Button variant="outline" onClick={() => setStep('map')}>Back</Button>
+            <Button onClick={buildPreview}>Preview Import</Button>
           </div>
         </div>
       )}
