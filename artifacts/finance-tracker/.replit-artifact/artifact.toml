@@ -1,0 +1,31 @@
+kind = "web"
+previewPath = "/"
+title = "Investment Tracker"
+version = "1.0.0"
+id = "artifacts/investment-tracker"
+router = "path"
+
+[[integratedSkills]]
+name = "react-vite"
+version = "1.0.0"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 25629
+
+[services.development]
+run = "pnpm --filter @workspace/investment-tracker run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/investment-tracker", "run", "build" ]
+publicDir = "artifacts/investment-tracker/dist/public"
+serve = "static"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "25629"
+BASE_PATH = "/"
