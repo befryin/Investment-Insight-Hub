@@ -1,6 +1,7 @@
 import { useState, useCallback, useMemo } from 'react';
 import { db, type LedgerTransaction } from '@/lib/db';
 import { parseFile, type ParsedTransaction } from '@/lib/importUtils';
+import { parseDate } from '@/lib/csvUtils';
 import { Upload, ChevronRight, Check, AlertCircle, Wand2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -10,18 +11,30 @@ import { useToast } from '@/hooks/use-toast';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { cn } from '@/lib/utils';
 
-type Step = 'upload' | 'preview' | 'done';
+type Step = 'upload' | 'map' | 'preview' | 'done';
+
+const EXPENSE_FIELDS = [
+  { key: 'date', label: 'Date', required: true, patterns: ['date', 'time'] },
+  { key: 'payee', label: 'Payee / Description', required: true, patterns: ['payee', 'description', 'name', 'title'] },
+  { key: 'amount', label: 'Amount', required: true, patterns: ['amount', 'value', 'total'] },
+  { key: 'category', label: 'Category', required: false, patterns: ['category', 'group'] },
+  { key: 'memo', label: 'Memo / Notes', required: false, patterns: ['memo', 'notes'] },
+];
 
 type ProcessedRow = ParsedTransaction & {
   valid: boolean;
   error?: string;
   assignedCategoryId?: string;
+  isNewCategory?: boolean;
 };
 
 export default function ExpenseImport() {
   const { toast } = useToast();
   const [step, setStep] = useState<Step>('upload');
   const [dragging, setDragging] = useState(false);
+  const [headers, setHeaders] = useState<string[]>([]);
+  const [rawRows, setRawRows] = useState<Record<string, string>[]>([]);
+  const [mapping, setMapping] = useState<Record<string, string>>({});
   const [parsed, setParsed] = useState<ProcessedRow[]>([]);
   const [selectedAccountId, setSelectedAccountId] = useState('');
   const [importing, setImporting] = useState(false);
@@ -36,8 +49,48 @@ export default function ExpenseImport() {
 
   async function handleFile(file: File) {
     try {
-      const txs = await parseFile(file);
+      const result = await parseFile(file);
       
+      if (result.type === 'csv') {
+        setHeaders(result.headers);
+        setRawRows(result.rows);
+        
+        const autoMap: Record<string, string> = {};
+        for (const field of EXPENSE_FIELDS) {
+          const matches = field.patterns;
+          for (const hdr of result.headers) {
+            if (matches.some(m => hdr.toLowerCase().includes(m))) {
+              autoMap[field.key] = hdr;
+              break;
+            }
+          }
+        }
+        setMapping(autoMap);
+        setStep('map');
+      } else {
+        await processTransactions(result.txs);
+      }
+    } catch (e: any) {
+      toast({ title: 'Error parsing file', description: e.message, variant: 'destructive' });
+    }
+  }
+
+  async function applyMapping() {
+    const txs: ParsedTransaction[] = rawRows.map(r => {
+      const dateRaw = mapping.date ? r[mapping.date] : '';
+      const date = parseDate(dateRaw) || '';
+      const amountRaw = parseFloat((mapping.amount ? r[mapping.amount] : '0').replace(/[$,]/g, '')) || 0;
+      const payee = mapping.payee ? r[mapping.payee] : 'Unknown Payee';
+      const category = mapping.category ? r[mapping.category] : undefined;
+      const memo = mapping.memo ? r[mapping.memo] : undefined;
+      return { date, amount: amountRaw, payee, category, memo };
+    });
+    
+    await processTransactions(txs);
+  }
+
+  async function processTransactions(txs: ParsedTransaction[]) {
+    try {
       const currentDbCats = await db.expenseCategories.toArray();
       const rulesArr = (rules || []).sort((a,b) => b.priority - a.priority);
       
@@ -45,6 +98,7 @@ export default function ExpenseImport() {
       
       for (const tx of txs) {
         let assignedCategoryId: string | undefined;
+        let isNewCategory = false;
         
         if (tx.category) {
           const catStr = tx.category.trim();
@@ -68,6 +122,7 @@ export default function ExpenseImport() {
             };
             await db.expenseCategories.add(existing);
             currentDbCats.push(existing);
+            isNewCategory = true;
           }
           assignedCategoryId = existing.id;
         }
@@ -95,6 +150,7 @@ export default function ExpenseImport() {
         processed.push({
           ...tx,
           assignedCategoryId,
+          isNewCategory,
           valid: !!tx.date && !isNaN(tx.amount),
           error: (!tx.date || isNaN(tx.amount)) ? 'Invalid date or amount' : undefined
         });
@@ -103,7 +159,7 @@ export default function ExpenseImport() {
       setParsed(processed);
       setStep('preview');
     } catch (e: any) {
-      toast({ title: 'Error parsing file', description: e.message, variant: 'destructive' });
+      toast({ title: 'Error processing transactions', description: e.message, variant: 'destructive' });
     }
   }
 
@@ -148,6 +204,7 @@ export default function ExpenseImport() {
 
   const STEPS = [
     { key: 'upload', label: 'Upload' },
+    { key: 'map', label: 'Map Columns' },
     { key: 'preview', label: 'Review & Categorize' },
     { key: 'done', label: 'Complete' },
   ];
@@ -190,6 +247,36 @@ export default function ExpenseImport() {
           <p className="text-sm text-muted-foreground mt-1">or click to browse</p>
           <input id="csv-upload" type="file" accept=".csv,.qif,.ofx,.qfx" className="hidden"
             onChange={e => { if (e.target.files?.[0]) handleFile(e.target.files[0]); }} />
+        </div>
+      )}
+
+      {step === 'map' && (
+        <div className="space-y-5">
+          <p className="text-sm text-muted-foreground">Detected {headers.length} columns, {rawRows.length} rows. Map your CSV columns to the app's fields.</p>
+          <div className="space-y-3">
+            {EXPENSE_FIELDS.map(field => (
+              <div key={field.key} className="flex items-center gap-4">
+                <div className="w-48 flex items-center gap-1.5">
+                  <span className="text-sm font-medium">{field.label}</span>
+                  {field.required && <span className="text-xs text-rose-500">*</span>}
+                </div>
+                <Select value={mapping[field.key] || 'none'} onValueChange={v => setMapping(m => ({ ...m, [field.key]: v === 'none' ? '' : v }))}>
+                  <SelectTrigger className="w-56"><SelectValue placeholder="Not mapped" /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="none">— Not mapped —</SelectItem>
+                    {headers.filter(h => h.trim()).map(h => <SelectItem key={h} value={h}>{h}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+                {mapping[field.key] && rawRows[0] && (
+                  <span className="text-xs text-muted-foreground italic truncate max-w-[120px]">e.g. "{rawRows[0][mapping[field.key]]}"</span>
+                )}
+              </div>
+            ))}
+          </div>
+          <div className="flex gap-3">
+            <Button variant="outline" onClick={() => setStep('upload')}>Back</Button>
+            <Button onClick={applyMapping}>Next Step</Button>
+          </div>
         </div>
       )}
 
@@ -255,6 +342,11 @@ export default function ExpenseImport() {
                             ))}
                           </SelectContent>
                         </Select>
+                        {r.isNewCategory && (
+                          <div className="mt-1 flex items-center gap-1 text-[10px] text-blue-600 font-medium bg-blue-50 px-1.5 py-0.5 rounded w-fit">
+                            <Wand2 className="h-3 w-3" /> Auto-added
+                          </div>
+                        )}
                       </td>
                       <td className={cn("px-3 py-2 text-right font-medium", (r.amount || 0) >= 0 ? "text-emerald-600" : "")}>
                         {r.amount}

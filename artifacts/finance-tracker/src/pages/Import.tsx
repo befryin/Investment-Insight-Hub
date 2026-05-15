@@ -1,7 +1,7 @@
 import { useState, useCallback } from 'react';
 import { db, type Transaction } from '@/lib/db';
 import { parseCSV, parseDate, type ColumnMapping } from '@/lib/csvUtils';
-import { Upload, ChevronRight, Check, AlertCircle } from 'lucide-react';
+import { Upload, ChevronRight, Check, AlertCircle, Wand2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Label } from '@/components/ui/label';
@@ -31,6 +31,7 @@ type ParsedRow = {
   date: string | null; type: string; amount: number; ticker?: string;
   shares?: number; price?: number; commission?: number; currency: 'CAD' | 'USD';
   notes?: string; classification?: string; valid: boolean; error?: string;
+  isNewSecurity?: boolean;
 };
 
 export default function ImportPage() {
@@ -128,6 +129,7 @@ export default function ImportPage() {
       const typeStr = actionMapping[rawType] || rawType || 'Buy';
       const amountRaw = parseFloat((mapping.amount ? r[mapping.amount] : '0').replace(/[$,]/g, '')) || 0;
       const ticker = mapping.ticker ? r[mapping.ticker]?.trim().toUpperCase() : undefined;
+      const isNewSecurity = ticker ? !secByTicker.has(ticker) : false;
       const shares = mapping.shares ? parseFloat(r[mapping.shares]) || undefined : undefined;
       const price = mapping.price ? parseFloat(r[mapping.price]?.replace(/[$,]/g, '')) || undefined : undefined;
       const commission = mapping.commission ? parseFloat(r[mapping.commission]?.replace(/[$,]/g, '')) || undefined : undefined;
@@ -139,7 +141,7 @@ export default function ImportPage() {
       if (!date) error = `Row ${i + 1}: Invalid date "${dateRaw}"`;
       if (!amountRaw && amountRaw !== 0) error = `Row ${i + 1}: Invalid amount`;
 
-      return { date, type: typeStr, amount: amountRaw, ticker, shares, price, commission, currency, notes, classification, valid: !error, error };
+      return { date, type: typeStr, amount: amountRaw, ticker, shares, price, commission, currency, notes, classification, valid: !error, error, isNewSecurity };
     });
     setParsed(rows);
     setStep('preview');
@@ -150,6 +152,28 @@ export default function ImportPage() {
     setImporting(true);
     const secByTicker = new Map((securities || []).map(s => [s.ticker.toUpperCase(), s]));
     const validRows = parsed.filter(r => r.valid);
+    
+    // Auto-create missing securities
+    const missingTickers = new Set<string>();
+    validRows.forEach(r => {
+      if (r.ticker && !secByTicker.has(r.ticker)) missingTickers.add(r.ticker);
+    });
+    
+    for (const ticker of missingTickers) {
+      const newSec = {
+        id: crypto.randomUUID(),
+        ticker: ticker,
+        name: `${ticker} (Auto-added)`,
+        currency: 'CAD',
+        type: 'Stock',
+        assetClass: 'Equity',
+        exchange: 'Unknown',
+        createdAt: new Date().toISOString(),
+      };
+      await db.securities.add(newSec);
+      secByTicker.set(ticker, newSec as any);
+    }
+
     const txs: Transaction[] = validRows.map(r => {
       const sec = r.ticker ? secByTicker.get(r.ticker) : undefined;
       // Match type
@@ -324,7 +348,14 @@ export default function ImportPage() {
                       </td>
                       <td className="px-3 py-1.5 font-mono">{r.date || <span className="text-rose-500">invalid</span>}</td>
                       <td className="px-3 py-1.5">{r.type}</td>
-                      <td className="px-3 py-1.5 font-mono">{r.ticker || '—'}</td>
+                      <td className="px-3 py-1.5 font-mono">
+                        {r.ticker || '—'}
+                        {r.isNewSecurity && (
+                          <div className="mt-1 flex items-center gap-1 text-[10px] text-blue-600 font-medium bg-blue-50 px-1.5 py-0.5 rounded w-fit">
+                            <Wand2 className="h-3 w-3" /> Auto-added
+                          </div>
+                        )}
+                      </td>
                       <td className="px-3 py-1.5 text-right font-mono">{r.shares ?? '—'}</td>
                       <td className="px-3 py-1.5 text-right font-mono">{r.amount}</td>
                     </tr>

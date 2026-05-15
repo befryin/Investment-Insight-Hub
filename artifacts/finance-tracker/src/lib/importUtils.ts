@@ -9,7 +9,11 @@ export type ParsedTransaction = {
   category?: string;
 };
 
-export async function parseFile(file: File): Promise<ParsedTransaction[]> {
+export type ParseFileResult = 
+  | { type: 'csv'; headers: string[]; rows: Record<string, string>[] }
+  | { type: 'parsed'; txs: ParsedTransaction[] };
+
+export async function parseFile(file: File): Promise<ParseFileResult> {
   const text = await file.text();
   const ext = file.name.split('.').pop()?.toLowerCase();
 
@@ -19,37 +23,11 @@ export async function parseFile(file: File): Promise<ParsedTransaction[]> {
         header: true,
         skipEmptyLines: true,
         complete: (results) => {
-          // Attempt generic mapping for CSV
-          const data = results.data as Record<string, string>[];
-          const txs: ParsedTransaction[] = [];
-          data.forEach(row => {
-            const rowKeys = Object.keys(row).map(k => k.toLowerCase());
-            
-            // Find columns
-            const dateKey = Object.keys(row).find(k => k.toLowerCase().includes('date'));
-            const payeeKey = Object.keys(row).find(k => /payee|description|name|title/i.test(k));
-            const amountKey = Object.keys(row).find(k => /amount|value|total/i.test(k));
-            const memoKey = Object.keys(row).find(k => /memo|notes/i.test(k));
-
-            if (dateKey && amountKey) {
-              const amountRaw = row[amountKey]?.replace(/[$,]/g, '');
-              const amount = parseFloat(amountRaw);
-              if (!isNaN(amount)) {
-                // Try to parse date
-                const dateRaw = row[dateKey];
-                const date = parseDate(dateRaw);
-                if (date) {
-                  txs.push({
-                    date,
-                    amount,
-                    payee: payeeKey ? row[payeeKey] : 'Unknown Payee',
-                    memo: memoKey ? row[memoKey] : undefined,
-                  });
-                }
-              }
-            }
+          resolve({ 
+            type: 'csv', 
+            headers: results.meta.fields || [], 
+            rows: results.data as Record<string, string>[] 
           });
-          resolve(txs);
         },
         error: reject,
       });
@@ -81,7 +59,7 @@ export async function parseFile(file: File): Promise<ParsedTransaction[]> {
         current.category = val;
       }
     }
-    return txs;
+    return { type: 'parsed', txs };
   } else if (ext === 'ofx' || ext === 'qfx') {
     // Basic OFX parser (regex based for simplicity)
     const txs: ParsedTransaction[] = [];
@@ -105,7 +83,7 @@ export async function parseFile(file: File): Promise<ParsedTransaction[]> {
         }
       }
     }
-    return txs;
+    return { type: 'parsed', txs };
   }
   
   throw new Error('Unsupported file format');
