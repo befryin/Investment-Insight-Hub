@@ -10,7 +10,7 @@ COPY . .
 
 # Install dependencies and build
 RUN pnpm install
-RUN pnpm run build
+RUN pnpm --filter @workspace/api-server... run build
 
 EXPOSE 3001
 ENV PORT=3001

@@ -10,7 +10,7 @@ COPY . .
 
 # Install and build
 RUN pnpm install
-RUN pnpm run build
+RUN pnpm --filter @workspace/finance-tracker... run build
 
 # Stage 2: Serve with Nginx
 FROM nginx:alpine
