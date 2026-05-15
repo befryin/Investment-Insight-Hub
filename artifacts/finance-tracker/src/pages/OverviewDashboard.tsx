@@ -32,6 +32,7 @@ export default function OverviewDashboard() {
   const categories = useLiveQuery(() => db.expenseCategories.toArray(), []);
   const ledgerTx = useLiveQuery(() => db.ledgerTransactions.toArray(), []);
   const ledgerSplits = useLiveQuery(() => db.ledgerSplits.toArray(), []);
+  const investmentTransactions = useLiveQuery(() => db.transactions.toArray(), []);
 
   useEffect(() => {
     fetchQuotes(['CADUSD=X']).then(qs => {
@@ -119,6 +120,30 @@ export default function OverviewDashboard() {
     let totalExpenses = 0;
     let totalIncome = 0;
     
+    let storedIncomeAccounts: string[] = [];
+    try {
+      const stored = localStorage.getItem('finhub_income_accounts');
+      if (stored) {
+        storedIncomeAccounts = JSON.parse(stored);
+      } else {
+        storedIncomeAccounts = (accounts || []).filter(a => a.type === 'Non-Registered').map(a => a.id);
+      }
+    } catch {}
+
+    const validInvTxs = (investmentTransactions || []).filter(t => {
+      if (!storedIncomeAccounts.includes(t.accountId)) return false;
+      const validTypes = ['Dividend', 'Interest', 'Distribution', 'Other Income', 'Foreign Income', 'Capital Gain Distribution'];
+      if (!validTypes.includes(t.type)) return false;
+      try {
+        const d = parseISO(t.date);
+        return isWithinInterval(d, { start: dateRange.start, end: dateRange.end });
+      } catch { return false; }
+    });
+
+    for (const t of validInvTxs) {
+      totalIncome += t.amount;
+    }
+    
     const expMap = new Map<string, number>(); // category -> amount
     const catDetails = new Map<string, any[]>(); // category -> tx list
 
@@ -146,8 +171,6 @@ export default function OverviewDashboard() {
             const arr = catDetails.get(key) || [];
             arr.push({ ...t, amount: s.amount, accountId: t.accountId });
             catDetails.set(key, arr);
-          } else {
-            totalIncome += s.amount;
           }
         }
       } else {
@@ -162,8 +185,6 @@ export default function OverviewDashboard() {
           const arr = catDetails.get(key) || [];
           arr.push(t);
           catDetails.set(key, arr);
-        } else {
-          totalIncome += t.amount;
         }
       }
     }
@@ -180,7 +201,7 @@ export default function OverviewDashboard() {
       expensesByCategory,
       catDetails
     };
-  }, [accounts, ledgerTx, ledgerSplits, categories, dateRange]);
+  }, [accounts, ledgerTx, ledgerSplits, categories, investmentTransactions, dateRange]);
 
   const totalNetWorth = investmentData.totalMarketValue + bankingData.totalCash;
 

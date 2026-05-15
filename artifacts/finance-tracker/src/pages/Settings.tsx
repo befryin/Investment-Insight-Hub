@@ -1,5 +1,6 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { db } from '@/lib/db';
+import { useLiveQuery } from 'dexie-react-hooks';
 import { AlertTriangle, Download, Upload, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -13,6 +14,30 @@ export default function SettingsPage() {
   const { toast } = useToast();
   const [clearDialog, setClearDialog] = useState(false);
   const [clearing, setClearing] = useState(false);
+  
+  const accounts = useLiveQuery(() => db.accounts.toArray(), []);
+  const [incomeAccounts, setIncomeAccounts] = useState<string[]>(() => {
+    try {
+      const stored = localStorage.getItem('finhub_income_accounts');
+      if (stored) return JSON.parse(stored);
+    } catch {}
+    return [];
+  });
+
+  useEffect(() => {
+    if (accounts && !localStorage.getItem('finhub_income_accounts')) {
+      const nonReg = accounts.filter(a => a.type === 'Non-Registered').map(a => a.id);
+      setIncomeAccounts(nonReg);
+    }
+  }, [accounts]);
+
+  const toggleIncomeAccount = (id: string) => {
+    const newAccounts = incomeAccounts.includes(id) 
+      ? incomeAccounts.filter(a => a !== id)
+      : [...incomeAccounts, id];
+    setIncomeAccounts(newAccounts);
+    localStorage.setItem('finhub_income_accounts', JSON.stringify(newAccounts));
+  };
 
   async function exportBackup() {
     const data = {
@@ -138,6 +163,32 @@ export default function SettingsPage() {
                 </div>
               );
             })}
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader className="pb-2">
+          <CardTitle className="text-base">Dashboard Settings</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div>
+            <p className="text-sm font-medium mb-1">Income Tracking Accounts</p>
+            <p className="text-xs text-muted-foreground mb-3">Select which accounts to include when calculating the "Total Income" KPI on the Overview Dashboard.</p>
+            <div className="space-y-2 max-h-40 overflow-y-auto border rounded-md p-3">
+              {(accounts || []).map(acc => (
+                <div key={acc.id} className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    id={`acc-${acc.id}`}
+                    checked={incomeAccounts.includes(acc.id)}
+                    onChange={() => toggleIncomeAccount(acc.id)}
+                    className="rounded border-gray-300"
+                  />
+                  <Label htmlFor={`acc-${acc.id}`} className="text-sm cursor-pointer">{acc.name} ({acc.type})</Label>
+                </div>
+              ))}
+            </div>
           </div>
         </CardContent>
       </Card>

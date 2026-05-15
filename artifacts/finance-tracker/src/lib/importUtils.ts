@@ -1,4 +1,5 @@
 import Papa from 'papaparse';
+import { parseDate } from './csvUtils';
 
 export type ParsedTransaction = {
   date: string; // YYYY-MM-DD
@@ -36,8 +37,8 @@ export async function parseFile(file: File): Promise<ParsedTransaction[]> {
               if (!isNaN(amount)) {
                 // Try to parse date
                 const dateRaw = row[dateKey];
-                const date = new Date(dateRaw).toISOString().split('T')[0];
-                if (date && date !== 'NaN-NaN-NaN') {
+                const date = parseDate(dateRaw);
+                if (date) {
                   txs.push({
                     date,
                     amount,
@@ -69,7 +70,7 @@ export async function parseFile(file: File): Promise<ParsedTransaction[]> {
         }
         current = {};
       } else if (type === 'D') {
-        current.date = new Date(val).toISOString().split('T')[0];
+        current.date = parseDate(val) || undefined;
       } else if (type === 'T' || type === 'U') {
         current.amount = parseFloat(val.replace(/[$,]/g, ''));
       } else if (type === 'P') {

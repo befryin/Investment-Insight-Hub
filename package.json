@@ -1,5 +1,5 @@
 {
-  "name": "workspace",
+  "name": "finhub",
   "version": "0.0.0",
   "license": "MIT",
   "scripts": {
@@ -10,7 +10,25 @@
   },
   "private": true,
   "devDependencies": {
-    "typescript": "~5.9.2",
-    "prettier": "^3.8.1"
+    "@rollup/rollup-win32-x64-msvc": "^4.60.4",
+    "lightningcss-win32-x64-msvc": "^1.32.0",
+    "prettier": "^3.8.1",
+    "typescript": "~5.9.2"
+  },
+  "pnpm": {
+    "supportedArchitectures": {
+      "os": [
+        "win32",
+        "linux",
+        "darwin"
+      ],
+      "cpu": [
+        "x64",
+        "arm64"
+      ]
+    },
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
   }
 }

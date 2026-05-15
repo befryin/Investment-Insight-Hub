@@ -38,37 +38,67 @@ export default function ExpenseImport() {
     try {
       const txs = await parseFile(file);
       
-      // Apply Auto-categorization rules
+      const currentDbCats = await db.expenseCategories.toArray();
       const rulesArr = (rules || []).sort((a,b) => b.priority - a.priority);
       
-      const processed: ProcessedRow[] = txs.map(tx => {
+      const processed: ProcessedRow[] = [];
+      
+      for (const tx of txs) {
         let assignedCategoryId: string | undefined;
         
-        for (const rule of rulesArr) {
-          const target = rule.matchField === 'payee' ? tx.payee : (tx.memo || '');
-          const t = target.toLowerCase();
-          const v = rule.matchValue.toLowerCase();
+        if (tx.category) {
+          const catStr = tx.category.trim();
+          let group = 'Imported';
+          let name = catStr;
           
-          if (rule.matchType === 'exact' && t === v) {
-            assignedCategoryId = rule.assignCategoryId; break;
-          } else if (rule.matchType === 'contains' && t.includes(v)) {
-            assignedCategoryId = rule.assignCategoryId; break;
-          } else if (rule.matchType === 'regex') {
-            try {
-              if (new RegExp(rule.matchValue, 'i').test(target)) {
-                assignedCategoryId = rule.assignCategoryId; break;
-              }
-            } catch (e) {} // ignore invalid regex
+          if (catStr.includes(':')) {
+            const parts = catStr.split(':');
+            group = parts[0].trim();
+            name = parts.slice(1).join(':').trim();
+          }
+          
+          let existing = currentDbCats.find(c => c.name.toLowerCase() === name.toLowerCase() && c.group.toLowerCase() === group.toLowerCase());
+          
+          if (!existing) {
+            existing = {
+              id: crypto.randomUUID(),
+              name,
+              group,
+              type: 'Expense'
+            };
+            await db.expenseCategories.add(existing);
+            currentDbCats.push(existing);
+          }
+          assignedCategoryId = existing.id;
+        }
+        
+        if (!assignedCategoryId) {
+          for (const rule of rulesArr) {
+            const target = rule.matchField === 'payee' ? tx.payee : (tx.memo || '');
+            const t = target.toLowerCase();
+            const v = rule.matchValue.toLowerCase();
+            
+            if (rule.matchType === 'exact' && t === v) {
+              assignedCategoryId = rule.assignCategoryId; break;
+            } else if (rule.matchType === 'contains' && t.includes(v)) {
+              assignedCategoryId = rule.assignCategoryId; break;
+            } else if (rule.matchType === 'regex') {
+              try {
+                if (new RegExp(rule.matchValue, 'i').test(target)) {
+                  assignedCategoryId = rule.assignCategoryId; break;
+                }
+              } catch (e) {}
+            }
           }
         }
         
-        return {
+        processed.push({
           ...tx,
           assignedCategoryId,
           valid: !!tx.date && !isNaN(tx.amount),
           error: (!tx.date || isNaN(tx.amount)) ? 'Invalid date or amount' : undefined
-        };
-      });
+        });
+      }
       
       setParsed(processed);
       setStep('preview');

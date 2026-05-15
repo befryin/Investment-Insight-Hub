@@ -2,7 +2,7 @@ import { Link, useLocation } from 'wouter';
 import {
   LayoutDashboard, Briefcase, TrendingUp, List, Upload, Download,
   PieChart, BarChart3, Wallet, Settings, ChevronRight, Calculator,
-  BuildingLibrary, Landmark, ReceiptText, Tags
+  Landmark, ReceiptText, Tags
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 

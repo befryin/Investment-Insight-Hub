@@ -29,18 +29,31 @@ export function parseCSV(file: File): Promise<{ headers: string[]; rows: Record<
 
 export function parseDate(value: string): string | null {
   if (!value) return null;
+  value = value.trim();
+  
   const formats = [
     /^(\d{4})-(\d{2})-(\d{2})$/,
-    /^(\d{2})\/(\d{2})\/(\d{4})$/,
-    /^(\d{2})-(\d{2})-(\d{4})$/,
     /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/,
+    /^(\d{1,2})-(\d{1,2})-(\d{4})$/,
   ];
 
   for (const fmt of formats) {
     const m = value.match(fmt);
     if (m) {
-      if (m[1].length === 4) return `${m[1]}-${m[2]}-${m[3]}`;
-      return `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
+      if (m[1].length === 4) {
+        const isoStr = `${m[1]}-${m[2]}-${m[3]}`;
+        if (!isNaN(new Date(isoStr).getTime())) return isoStr;
+      } else {
+        const iso1 = `${m[3]}-${m[1].padStart(2, '0')}-${m[2].padStart(2, '0')}`;
+        const iso2 = `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
+        
+        const is1Valid = !isNaN(new Date(iso1).getTime()) && Number(m[1]) <= 12;
+        const is2Valid = !isNaN(new Date(iso2).getTime()) && Number(m[2]) <= 12;
+
+        if (is1Valid && !is2Valid) return iso1;
+        if (is2Valid && !is1Valid) return iso2;
+        if (is1Valid && is2Valid) return iso1; // Default to MM/DD/YYYY if ambiguous
+      }
     }
   }
 

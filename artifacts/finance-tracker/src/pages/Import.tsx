@@ -25,7 +25,7 @@ const APP_FIELDS = [
   { key: 'classification', label: 'Distribution Classification', required: false },
 ] as const;
 
-type Step = 'upload' | 'map' | 'preview' | 'done';
+type Step = 'upload' | 'map' | 'map-actions' | 'preview' | 'done';
 
 type ParsedRow = {
   date: string | null; type: string; amount: number; ticker?: string;
