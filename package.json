@@ -10,10 +10,12 @@
   },
   "private": true,
   "devDependencies": {
-    "@rollup/rollup-win32-x64-msvc": "^4.60.4",
-    "lightningcss-win32-x64-msvc": "^1.32.0",
     "prettier": "^3.8.1",
     "typescript": "~5.9.2"
+  },
+  "optionalDependencies": {
+    "@rollup/rollup-win32-x64-msvc": "^4.60.4",
+    "lightningcss-win32-x64-msvc": "^1.32.0"
   },
   "pnpm": {
     "supportedArchitectures": {

@@ -66,6 +66,16 @@ $env:PORT=5174; pnpm --filter @workspace/finance-tracker run dev
 ```
 Accessible at `http://localhost:5174/`
 
+## Docker Deployment (Production)
+
+You can spin up the entire FinHub stack in isolated containers (using Nginx to serve the frontend and Node to serve the backend).
+
+```bash
+docker-compose up --build -d
+```
+
+The application will be seamlessly served at `http://localhost/` (Port 80).
+
 ## First Run & Demo Data
 
 On first load, the applications may seed demo data automatically (e.g., portfolios, ETF/stock holdings, sample transactions, or financial accounts). This only happens once. To reset your data:
