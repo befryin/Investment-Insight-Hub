@@ -1,0 +1,11 @@
+node_modules
+dist
+.env
+.DS_Store
+artifacts/*/node_modules
+artifacts/*/dist
+.git
+.gemini
+coverage
+.svelte-kit
+.next
